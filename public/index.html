@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>TurboMania Online — Multiplayer Championship & Practice</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/vendor/three/build/three.module.js",
+      "three/addons/": "/vendor/three/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <!-- 3D WebGL Canvas -->
+  <canvas id="game-canvas"></canvas>
+
+  <!-- Top HUD Bar -->
+  <header id="top-bar" class="hud-hidden">
+    <div class="top-left-group">
+      <!-- Mode / Party Code / Invite Badge -->
+      <div id="party-badge" class="glass-panel party-pill">
+        <span class="status-dot online" id="conn-dot"></span>
+        <span class="party-label" id="party-code-label">PRACTICE MODE</span>
+        <button id="btn-copy-code" class="icon-btn hidden" title="Copy Room Code">📋 Code</button>
+        <button id="btn-copy-link" class="icon-btn accent hidden" title="Copy Direct Invite Link">🔗 Invite Link</button>
+      </div>
+
+      <!-- Track & Medal Targets -->
+      <div class="glass-panel track-pill">
+        <div class="track-title-row">
+          <span id="hud-track-name" class="track-name">01 - Stadium Grand Endurance</span>
+          <span id="hud-track-diff" class="diff-badge">Beginner</span>
+        </div>
+        <div class="medals-row">
+          <span class="medal-chip author" title="Author Medal">🟢 <b id="medal-author">01:16.000</b></span>
+          <span class="medal-chip gold" title="Gold Medal">🥇 <b id="medal-gold">01:23.000</b></span>
+          <span class="medal-chip silver" title="Silver Medal">🥈 <b id="medal-silver">01:34.000</b></span>
+          <span class="medal-chip bronze" title="Bronze Medal">🥉 <b id="medal-bronze">01:52.000</b></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center Match Round Indicator & Round Timer -->
+    <div class="top-center-group">
+      <div class="glass-panel round-timer-pill">
+        <span class="round-label" id="hud-round-label">PRACTICE TIME ATTACK</span>
+        <span id="hud-round-timer" class="round-clock">∞ FREE</span>
+      </div>
+    </div>
+
+    <!-- Right Quick Actions -->
+    <div class="top-right-group">
+      <button id="btn-host-maps" class="hud-btn accent-btn" title="Switch Track / Match Controls">🗺️ Tracks & Match</button>
+      <button id="btn-open-garage" class="hud-btn" title="Choose 3D Vehicle [V]">🏎️ Garage</button>
+      <button id="btn-open-builder" class="hud-btn" title="Custom 3D Track Builder">🛠️ Builder</button>
+      <button id="btn-cam-toggle" class="hud-btn" title="Switch Camera [C]">🎥 Cam</button>
+      <button id="btn-ghost-toggle" class="hud-btn active" title="Toggle Ghosts [G]">👻 Ghosts</button>
+      <button id="btn-mute-toggle" class="hud-btn" title="Mute / Unmute Audio [M]">🔊</button>
+      <button id="btn-open-lobby" class="hud-btn" title="Main Menu [Esc]">🏠 Menu</button>
+    </div>
+  </header>
+
+  <!-- Left Live Leaderboard Panel (with Tabs: Round | Overall | Track Top 10) -->
+  <aside id="leaderboard-panel" class="glass-panel hud-hidden">
+    <div class="panel-header">
+      <span id="lb-panel-title">🏁 LEADERBOARD</span>
+      <span id="player-count-badge" class="count-pill">Top 10</span>
+    </div>
+
+    <div class="lb-tabs">
+      <button id="tab-lb-round" class="lb-tab active" data-tab="round">🏁 Round</button>
+      <button id="tab-lb-overall" class="lb-tab" data-tab="overall">🏆 Overall</button>
+      <button id="tab-lb-top10" class="lb-tab" data-tab="top10">🌎 Track Top 10</button>
+    </div>
+
+    <div id="leaderboard-list" class="leaderboard-list"></div>
+
+    <div id="spectate-banner" class="spectate-banner hidden">
+      <span>👁️ Spectating: <b id="spectate-name">Driver</b></span>
+      <button id="btn-stop-spectate" class="mini-btn">Drive [Tab]</button>
+    </div>
+  </aside>
+
+  <!-- Right Controls Reference Mini Card -->
+  <aside id="controls-card" class="glass-panel hud-hidden">
+    <div class="ctrl-row"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / <kbd>Arrows</kbd> <span>Drive & Steer</span></div>
+    <div class="ctrl-row"><kbd>Space</kbd> / <kbd>S</kbd> + Steer <span>Drift / Air-Brake</span></div>
+    <div class="ctrl-row"><kbd>Backspace</kbd> / <kbd>E</kbd> <span>Respawn CP</span></div>
+    <div class="ctrl-row"><kbd>R</kbd> / <kbd>Del</kbd> <span>Restart Lap</span></div>
+    <div class="ctrl-row"><kbd>C</kbd> <span>Camera</span> &bull; <kbd>G</kbd> <span>Ghost</span></div>
+  </aside>
+
+  <!-- Center Overlays: Countdown, Split Delta, Finish Run Banner -->
+  <div id="center-notifications" class="pointer-none">
+    <div id="countdown-banner" class="countdown-banner hidden">3</div>
+
+    <div id="split-popup" class="split-popup hidden">
+      <div class="split-cp" id="split-cp-label">CHECKPOINT 1/9</div>
+      <div class="split-time" id="split-time-val">00:08.412</div>
+      <div class="split-delta" id="split-delta-val">-0.245s</div>
+      <div class="split-speed" id="split-speed-val">264 KM/H</div>
+    </div>
+
+    <div id="finish-banner" class="finish-banner hidden">
+      <div class="finish-header" id="finish-title">🏁 LAP COMPLETED!</div>
+      <div class="finish-time" id="finish-time-val">01:18.420</div>
+      <div class="finish-delta" id="finish-delta-val">NEW PERSONAL BEST!</div>
+      <div class="finish-medal" id="finish-medal-badge">🥇 GOLD MEDAL UNLOCKED</div>
+      <div class="finish-hint">Press <kbd>R</kbd> or click <b>Restart Lap</b> to drive again</div>
+    </div>
+  </div>
+
+  <!-- Bottom-Left Party Chat & Feed -->
+  <section id="chat-panel" class="glass-panel hud-hidden">
+    <div id="chat-messages" class="chat-messages"></div>
+    <div class="quick-emotes">
+      <button class="emote-btn" data-emote="🔥 Nice lap!">🔥 Nice lap!</button>
+      <button class="emote-btn" data-emote="😱 So close!">😱 So close!</button>
+      <button class="emote-btn" data-emote="⏳ One more try!">⏳ One more!</button>
+      <button class="emote-btn" data-emote="🏆 GG WP!">🏆 GG!</button>
+    </div>
+    <form id="chat-form" class="chat-form">
+      <input type="text" id="chat-input" placeholder="Press Enter to chat..." maxlength="100" autocomplete="off" />
+      <button type="submit">Send</button>
+    </form>
+  </section>
+
+  <!-- Bottom-Center Race Timer & Speedometer Cluster -->
+  <footer id="bottom-hud" class="hud-hidden">
+    <div class="quick-race-btns">
+      <button id="btn-respawn-cp" class="race-action-btn" title="Respawn at Last Checkpoint [Backspace]">⏪ Checkpoint</button>
+      <button id="btn-restart-run" class="race-action-btn primary" title="Restart Lap from Start [R]">🔄 Restart Lap</button>
+    </div>
+
+    <div class="glass-panel chrono-cluster">
+      <div class="chrono-top-row">
+        <span id="cp-counter-badge" class="cp-badge">CP 0 / 9</span>
+        <span id="surface-badge" class="surface-badge">ASPHALT</span>
+      </div>
+      <div id="hud-race-timer" class="main-timer">00:00.000</div>
+      <div class="records-subrow">
+        <span>PB: <b id="hud-pb-time">--:--.---</b></span>
+        <span>TRACK #1: <b id="hud-room-best">--:--.---</b></span>
+      </div>
+    </div>
+
+    <div class="glass-panel speedo-cluster">
+      <div class="speed-top">
+        <div class="gear-box" id="hud-gear">1</div>
+        <div class="speed-readout">
+          <span id="hud-speed">0</span>
+          <small>KM/H</small>
+        </div>
+      </div>
+      <div class="rpm-bar-bg">
+        <div id="hud-rpm-fill" class="rpm-bar-fill"></div>
+      </div>
+      <div class="state-tags">
+        <span id="tag-drift" class="state-tag">DRIFT</span>
+        <span id="tag-boost" class="state-tag">TURBO</span>
+        <span id="tag-air" class="state-tag">AIR</span>
+        <span id="tag-freewheel" class="state-tag danger">NO ENGINE</span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Mobile / Touch Controls -->
+  <div id="touch-controls" class="touch-controls hidden">
+    <div class="touch-left">
+      <button id="touch-left" class="touch-btn">◀</button>
+      <button id="touch-right" class="touch-btn">▶</button>
+    </div>
+    <div class="touch-right">
+      <button id="touch-brake" class="touch-btn brake">BRAKE / DRIFT</button>
+      <button id="touch-gas" class="touch-btn gas">GAS</button>
+    </div>
+  </div>
+
+  <!-- ==================== MODALS ==================== -->
+
+  <!-- 1. Main Menu Modal: Two Ways to Play (1. Online Multiplayer | 2. Practice Mode) -->
+  <div id="lobby-modal" class="modal-backdrop">
+    <div class="modal-card lobby-card">
+      <div class="brand-header">
+        <div class="brand-badge">3D STADIUM TIME-ATTACK RACING</div>
+        <h1>TURBO<span>MANIA</span></h1>
+        <p>Choose <b>Online Multiplayer (3–5 Round Championship)</b> or <b>Practice Mode</b> — all laps count toward each track's Top 10 Leaderboard!</p>
+      </div>
+
+      <!-- Driver Profile -->
+      <div class="profile-section">
+        <div class="field-group">
+          <label for="player-name-input">DRIVER NICKNAME</label>
+          <input type="text" id="player-name-input" maxlength="16" placeholder="Enter your racer name..." value="SpeedRacer" />
+        </div>
+        <div class="field-group">
+          <label>3D RACING VEHICLE</label>
+          <button type="button" id="btn-profile-garage" class="styled-garage-select-btn">
+            <span id="profile-selected-car-name">🏎️ Apex Formula 1</span>
+            <span class="badge-mini">Select Model ▾</span>
+          </button>
+        </div>
+        <div class="field-group">
+          <label>CAR LIVERY COLOR</label>
+          <div id="color-picker" class="color-swatches">
+            <button type="button" class="color-swatch active" data-color="#00f0ff" style="background:#00f0ff"></button>
+            <button type="button" class="color-swatch" data-color="#ff2a6d" style="background:#ff2a6d"></button>
+            <button type="button" class="color-swatch" data-color="#10b981" style="background:#10b981"></button>
+            <button type="button" class="color-swatch" data-color="#f59e0b" style="background:#f59e0b"></button>
+            <button type="button" class="color-swatch" data-color="#a855f7" style="background:#a855f7"></button>
+            <button type="button" class="color-swatch" data-color="#3b82f6" style="background:#3b82f6"></button>
+            <button type="button" class="color-swatch" data-color="#f97316" style="background:#f97316"></button>
+            <button type="button" class="color-swatch" data-color="#f8fafc" style="background:#f8fafc"></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mode Selector Tabs: 1) Online Multiplayer  2) Practice & Track Top 10 -->
+      <div class="mode-switch-tabs">
+        <button id="mode-tab-online" class="mode-switch-btn active">🌐 1. Online Multiplayer (3–5 Rounds)</button>
+        <button id="mode-tab-practice" class="mode-switch-btn">🏎️ 2. Practice & Track Top 10</button>
+      </div>
+
+      <div id="lobby-error" class="error-banner hidden"></div>
+
+      <!-- VIEW 1: ONLINE MULTIPLAYER (Create or Join 3-5 Round Party Match) -->
+      <div id="lobby-view-online" class="party-grid">
+        <!-- Create Party Card -->
+        <div class="action-box highlight">
+          <h3>🎉 Create Online Party Match</h3>
+          <p>Host a 3–5 round tournament where every round is a different map!</p>
+
+          <div class="two-col-fields">
+            <div class="field-group">
+              <label class="mini-label">MATCH LENGTH</label>
+              <select id="create-rounds-select" class="styled-select">
+                <option value="3" selected>3 Rounds (3 Maps)</option>
+                <option value="4">4 Rounds (4 Maps)</option>
+                <option value="5">5 Rounds (5 Maps)</option>
+                <option value="8">8 Rounds (8 Maps)</option>
+                <option value="10">10 Rounds (All 10 Maps)</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label class="mini-label">TIME PER ROUND</label>
+              <select id="create-duration-select" class="styled-select">
+                <option value="120">2 Minutes / Map</option>
+                <option value="180">3 Minutes / Map</option>
+                <option value="240" selected>4 Minutes / Map</option>
+                <option value="300">5 Minutes / Map</option>
+                <option value="360">6 Minutes / Map</option>
+              </select>
+            </div>
+          </div>
+
+          <label class="mini-label">STARTING MAP (ROUND 1 OF 10 MAPS)</label>
+          <select id="create-track-select" class="styled-select"></select>
+
+          <button id="btn-create-party" class="primary-cta">🚀 Create Party Lobby & Get Code</button>
+        </div>
+
+        <!-- Join Party Card -->
+        <div class="action-box">
+          <h3>🤝 Join Friend's Party</h3>
+          <p>Enter the 5-letter party code shared by your friend to join their party lobby.</p>
+          <label class="mini-label">PARTY ROOM CODE</label>
+          <input type="text" id="join-code-input" class="code-input" maxlength="6" placeholder="E.G. TRK42" />
+          <button id="btn-join-party" class="secondary-cta" style="margin-top:auto;">🏁 Join Online Party</button>
+        </div>
+      </div>
+
+      <!-- VIEW 2: PRACTICE MODE & TRACK TOP 10 LEADERBOARDS -->
+      <div id="lobby-view-practice" class="practice-grid hidden">
+        <div class="practice-tracks-col">
+          <label class="mini-label">SELECT TRACK TO PRACTICE (10 MAPS • 1–2 MIN LAPS)</label>
+          <div id="practice-track-list" class="practice-track-list"></div>
+          <button id="btn-start-practice" class="primary-cta" style="width:100%;margin-top:10px;">
+            🏎️ Launch Practice on Selected Track
+          </button>
+        </div>
+
+        <div class="practice-top10-col">
+          <div class="top10-header">
+            <span class="mini-label">🌎 TRACK TOP 10 LEADERBOARD</span>
+            <span id="practice-top10-trackname" class="top10-sub">01 - Turbo Stadium GP</span>
+          </div>
+          <div id="practice-top10-list" class="top10-table-box"></div>
+        </div>
+      </div>
+
+      <div class="modal-footer-row">
+        <button id="btn-resume-game" class="text-btn hidden">⬅ Return to Active Track [Esc]</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 1B. Online Party Waiting Room Lobby (Host configures settings & starts when all friends join) -->
+  <div id="party-waiting-modal" class="modal-backdrop hidden">
+    <div class="modal-card lobby-card">
+      <div class="modal-top-bar">
+        <div>
+          <span class="brand-badge">ONLINE MULTIPLAYER WAITING ROOM</span>
+          <h2 style="margin-top:4px;">🎉 Party Lobby — Wait for Friends & Configure Match</h2>
+        </div>
+        <button id="btn-waiting-leave" class="ghost-cta mini">🚪 Leave Party</button>
+      </div>
+
+      <!-- Party Code & Invite Banner -->
+      <div class="party-share-banner" style="margin-bottom:14px;">
+        <div>
+          <span class="mini-label">SHARE THIS PARTY CODE WITH YOUR FRIENDS</span>
+          <div class="big-code" id="waiting-room-code">-----</div>
+        </div>
+        <div class="share-btn-group">
+          <button id="btn-waiting-garage" class="secondary-cta mini">🏎️ Change Vehicle</button>
+          <button id="btn-waiting-copy-code" class="secondary-cta mini">📋 Copy Party Code</button>
+          <button id="btn-waiting-copy-link" class="primary-cta mini">🔗 Copy Direct Invite Link</button>
+        </div>
+      </div>
+
+      <div class="party-grid" style="margin-bottom:14px;">
+        <!-- Left Column: Connected Players + Lobby Chat -->
+        <div class="action-box">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <h3>🏎️ Joined Friends</h3>
+            <span id="waiting-player-count" class="count-pill">1 / 24 Joined</span>
+          </div>
+          <p>The game will not start until the host clicks <b>Start Game</b> below.</p>
+          <div id="waiting-players-list" class="waiting-players-list"></div>
+
+          <label class="mini-label" style="margin-top:8px;">💬 PARTY LOBBY CHAT</label>
+          <div id="waiting-chat-messages" class="waiting-chat-box"></div>
+          <form id="waiting-chat-form" class="chat-form">
+            <input type="text" id="waiting-chat-input" placeholder="Message party lobby..." maxlength="100" autocomplete="off" />
+            <button type="submit">Send</button>
+          </form>
+        </div>
+
+        <!-- Right Column: Match Settings (Editable by Host, Live Synced to All) -->
+        <div class="action-box highlight">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <h3>⚙️ Championship Settings</h3>
+            <span id="waiting-host-badge" class="diff-badge">HOST CONTROLS</span>
+          </div>
+          <p id="waiting-settings-hint">Change any setting below — updates live for everyone in the lobby!</p>
+
+          <div class="two-col-fields">
+            <div class="field-group">
+              <label class="mini-label">NUMBER OF ROUNDS</label>
+              <select id="waiting-rounds-select" class="styled-select">
+                <option value="3" selected>3 Rounds (3 Maps)</option>
+                <option value="4">4 Rounds (4 Maps)</option>
+                <option value="5">5 Rounds (5 Maps)</option>
+                <option value="8">8 Rounds (8 Maps)</option>
+                <option value="10">10 Rounds (All 10 Maps)</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label class="mini-label">TIME PER ROUND</label>
+              <select id="waiting-duration-select" class="styled-select">
+                <option value="120">2 Minutes / Map</option>
+                <option value="180">3 Minutes / Map</option>
+                <option value="240" selected>4 Minutes / Map</option>
+                <option value="300">5 Minutes / Map</option>
+                <option value="360">6 Minutes / Map</option>
+              </select>
+            </div>
+          </div>
+
+          <label class="mini-label">STARTING MAP (ROUND 1)</label>
+          <select id="waiting-track-select" class="styled-select"></select>
+
+          <label class="mini-label" style="margin-top:4px;">🗺️ MATCH MAP ROTATION PLAYLIST</label>
+          <div id="waiting-playlist-preview" class="waiting-playlist-box"></div>
+        </div>
+      </div>
+
+      <!-- Bottom Start Bar -->
+      <div class="waiting-footer-bar">
+        <div id="waiting-nonhost-msg" class="waiting-status-text hidden">
+          ⏳ Waiting for the Party Host to start the championship...
+        </div>
+        <button id="btn-waiting-start-game" class="primary-cta start-match-cta">
+          🚦 START GAME NOW (LAUNCH ROUND 1)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. In-Game Track Switcher, Match Controls & Track Top 10 Modal -->
+  <div id="host-modal" class="modal-backdrop hidden">
+    <div class="modal-card medium-card">
+      <div class="modal-top-bar">
+        <h2 id="host-modal-title">🗺️ Tracks, Top 10 Records & Match Controls</h2>
+        <button id="btn-close-host" class="close-x">✕</button>
+      </div>
+
+      <div class="party-share-banner" id="modal-party-banner">
+        <div>
+          <span class="mini-label" id="modal-mode-sublabel">CURRENT MODE</span>
+          <div class="big-code" id="modal-room-code">PRACTICE</div>
+        </div>
+        <div class="share-btn-group" id="modal-share-btns">
+          <button id="btn-modal-copy-code" class="secondary-cta mini">📋 Copy Code</button>
+          <button id="btn-modal-copy-link" class="primary-cta mini">🔗 Copy Invite Link</button>
+        </div>
+      </div>
+
+      <label class="mini-label">10 DEFAULT ENDURANCE TRACKS (CLICK TO SELECT / VIEW TOP 10)</label>
+      <div id="campaign-track-cards" class="track-cards-grid"></div>
+
+      <!-- Selected Track Top 10 Preview inside Modal -->
+      <div class="modal-top10-section">
+        <div class="panel-header" style="margin-bottom:6px;">
+          <span>🌎 TOP 10 TIMES ON <b id="modal-top10-title" style="color:#00f0ff;">TRACK</b> (ONLINE + PRACTICE)</span>
+        </div>
+        <div id="modal-top10-list" class="top10-compact-list"></div>
+      </div>
+
+      <div class="host-settings-row" id="host-online-controls">
+        <div class="two-col-fields" style="flex:1;">
+          <div class="field-group">
+            <label class="mini-label">ROUNDS</label>
+            <select id="host-rounds-select" class="styled-select">
+              <option value="3" selected>3 Rounds</option>
+              <option value="4">4 Rounds</option>
+              <option value="5">5 Rounds</option>
+              <option value="8">8 Rounds</option>
+              <option value="10">10 Rounds</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label class="mini-label">ROUND TIME</label>
+            <select id="host-duration-select" class="styled-select">
+              <option value="120">2 Minutes</option>
+              <option value="180">3 Minutes</option>
+              <option value="240" selected>4 Minutes</option>
+              <option value="300">5 Minutes</option>
+              <option value="360">6 Minutes</option>
+            </select>
+          </div>
+        </div>
+        <div class="host-action-btns">
+          <button id="btn-return-party-lobby" class="ghost-cta mini">🏠 Party Lobby</button>
+          <button id="btn-end-round" class="secondary-cta mini">⏭️ Finish Round</button>
+          <button id="btn-restart-round" class="primary-cta mini">🔄 Restart Match</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. Custom 3D Track Builder Modal -->
+  <div id="builder-modal" class="modal-backdrop builder-backdrop hidden">
+    <div class="modal-card builder-card">
+      <div class="modal-top-bar">
+        <h2>🛠️ 3D Stadium Track Builder</h2>
+        <button id="btn-close-builder" class="close-x">✕</button>
+      </div>
+      <p class="builder-sub">Snap track blocks together and click <b>Load & Race Track</b> to play it in Practice or broadcast it to your party!</p>
+
+      <div class="builder-row">
+        <input type="text" id="custom-track-name" placeholder="Custom Track Name" value="My Stunt Circuit" maxlength="28" />
+        <select id="custom-track-theme" class="styled-select">
+          <option value="stadium_day">☀️ Stadium Day</option>
+          <option value="cyber_sunset">🌆 Cyber Sunset</option>
+          <option value="sky_acrobat">☁️ Sky Acrobat</option>
+          <option value="arctic_turbo">❄️ Arctic Ice</option>
+          <option value="grand_prix_night">🌙 Night Grand Prix</option>
+          <option value="desert_canyon">🏜️ Desert Canyon</option>
+          <option value="volcano_core">🌋 Volcano Core</option>
+          <option value="tokyo_neon">🗼 Tokyo Neon</option>
+          <option value="emerald_forest">🌲 Emerald Forest</option>
+          <option value="solar_eclipse">🌘 Solar Eclipse</option>
+        </select>
+      </div>
+
+      <div class="preset-blocks-bar">
+        <button class="block-add-btn" data-preset="straight">➕ Straight</button>
+        <button class="block-add-btn" data-preset="boost">⚡ Turbo Boost</button>
+        <button class="block-add-btn" data-preset="super_boost">🚀 Super Boost</button>
+        <button class="block-add-btn" data-preset="left90">↩️ Left 90°</button>
+        <button class="block-add-btn" data-preset="right90">↪️ Right 90°</button>
+        <button class="block-add-btn" data-preset="bankLeft">📐 Banked Left</button>
+        <button class="block-add-btn" data-preset="bankRight">📐 Banked Right</button>
+        <button class="block-add-btn" data-preset="hairpin">🔄 Hairpin 180°</button>
+        <button class="block-add-btn" data-preset="climb">⛰️ Uphill Ramp</button>
+        <button class="block-add-btn" data-preset="drop">📉 Downhill Drop</button>
+        <button class="block-add-btn" data-preset="jump">🦅 Canyon Jump Gap</button>
+        <button class="block-add-btn" data-preset="ice">❄️ Ice Bobsled</button>
+        <button class="block-add-btn" data-preset="dirt">🏜️ Dirt Sector</button>
+        <button class="block-add-btn" data-preset="checkpoint">🚩 Checkpoint</button>
+      </div>
+
+      <div id="builder-blocks-list" class="builder-blocks-list"></div>
+
+      <div class="builder-footer">
+        <button id="btn-builder-clear" class="ghost-cta mini">🗑️ Reset Blocks</button>
+        <button id="btn-builder-play" class="primary-cta mini">🏁 Load & Race Track</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3B. Garage / 3D Vehicle Selector Modal -->
+  <div id="garage-modal" class="modal-backdrop hidden">
+    <div class="modal-card garage-card">
+      <div class="modal-top-bar">
+        <div>
+          <span class="brand-badge">3D VEHICLE GARAGE</span>
+          <h2 style="margin-top:4px;">🏎️ Select Your 3D Racing Machine</h2>
+        </div>
+        <button id="btn-close-garage" class="close-x">✕</button>
+      </div>
+      <p style="color:var(--text-muted);font-size:0.92rem;margin-bottom:14px;">
+        Choose from 10 authentic 3D vehicles. Your vehicle is rendered in full 3D with steering front wheels, tire spin, and boost flames — and visible to all online multiplayer friends!
+      </p>
+
+      <div id="garage-grid" class="garage-grid"></div>
+
+      <div class="garage-footer">
+        <span id="garage-selected-summary" class="garage-summary-text">Active: <b>Apex Formula 1</b></span>
+        <button id="btn-confirm-garage" class="primary-cta mini">✓ Confirm & Drive Vehicle</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Round Results & Final Overall Championship Modal -->
+  <div id="podium-modal" class="modal-backdrop hidden">
+    <div class="modal-card championship-card">
+      <div class="brand-badge" id="podium-badge-label">ROUND 1 OF 3 COMPLETED</div>
+      <h2 id="podium-track-title">01 - Turbo Stadium GP</h2>
+
+      <!-- Top 3 Podium (shown on Final Match Over or Round Over) -->
+      <div id="podium-columns" class="podium-stage"></div>
+
+      <!-- Dual Tables: Left = Round Wise Standings, Right = Overall Championship Standings -->
+      <div class="championship-tables-grid">
+        <div class="champ-table-box">
+          <h4 id="round-table-heading">🏁 ROUND RESULTS</h4>
+          <div id="round-results-table" class="champ-table-list"></div>
+        </div>
+        <div class="champ-table-box">
+          <h4 id="overall-table-heading">🏆 OVERALL CHAMPIONSHIP STANDINGS</h4>
+          <div id="overall-results-table" class="champ-table-list"></div>
+        </div>
+      </div>
+
+      <!-- Round-by-Round History Breakdown (visible when match completes) -->
+      <div id="round-history-breakdown" class="round-history-box hidden"></div>
+
+      <div class="podium-footer">
+        <span id="podium-countdown-text">Next round map loading soon...</span>
+        <div style="display:flex;gap:8px;">
+          <button id="btn-podium-lobby" class="ghost-cta mini">🏠 Party Lobby & Settings</button>
+          <button id="btn-podium-next" class="primary-cta mini">⏭️ Start Next Round Now</button>
+          <button id="btn-podium-new-match" class="secondary-cta mini hidden">🚀 Rematch Now</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Socket.io Client Library -->
+  <script src="/socket.io/socket.io.js"></script>
+  <!-- Main Application Entry -->
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>
