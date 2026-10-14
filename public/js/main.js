@@ -59,11 +59,39 @@ renderer.buildTrackScene(currentTrack);
 
 const physics = new CarPhysics(currentTrack);
 
-// Player Profile
-let playerName =
-  localStorage.getItem('tm_player_name') || `Racer${Math.floor(100 + Math.random() * 899)}`;
-let playerColor = localStorage.getItem('tm_player_color') || '#00f0ff';
-let playerCarModel = localStorage.getItem('tm_car_model') || 'race';
+// ==================== USER PROFILE & LOCAL STORAGE MEMORY ====================
+// One-time reset of legacy test records and old placeholder names
+const RESET_KEY = 'tm_v2_reset_leaderboards';
+if (localStorage.getItem(RESET_KEY) !== '1') {
+  localStorage.removeItem('tm_player_name');
+  localStorage.removeItem('tm_has_custom_name');
+  localStorage.removeItem('tm_personal_bests');
+  localStorage.removeItem('tm_user_id');
+  localStorage.setItem(RESET_KEY, '1');
+}
+
+// Check if user has previously customized their username
+const hasSavedCustomName = localStorage.getItem('tm_has_custom_name') === 'true';
+let playerName = '';
+let playerColor = '#00f0ff';
+let playerCarModel = 'race';
+
+if (hasSavedCustomName && localStorage.getItem('tm_player_name')) {
+  playerName = localStorage.getItem('tm_player_name');
+  playerColor = localStorage.getItem('tm_player_color') || '#00f0ff';
+  playerCarModel = localStorage.getItem('tm_car_model') || 'race';
+} else {
+  // Initially assign a guest username for every new user
+  let guestName = sessionStorage.getItem('tm_guest_name');
+  if (!guestName) {
+    guestName = `Guest_${Math.floor(1000 + Math.random() * 9000)}`;
+    sessionStorage.setItem('tm_guest_name', guestName);
+  }
+  playerName = guestName;
+  playerColor = '#00f0ff';
+  playerCarModel = 'race';
+}
+
 renderer.updateCarColor(renderer.localCar, playerColor);
 renderer.setCarModel(renderer.localCar, playerCarModel);
 renderer.setCarModel(renderer.pbGhostCar, playerCarModel);
@@ -115,11 +143,104 @@ const remotePlayers = new Map();
 let spectateTargetId = null;
 
 // Personal Best & Ghost Recording (20Hz keyframes)
-const localPersonalBests = new Map(); // trackId -> { timeMs, splits, ghostFrames }
+const localPersonalBests = new Map(); // trackId -> { timeMs, splits, ghostFrames, date }
+
+// Load remembered personal bests if user has a saved profile
+if (hasSavedCustomName) {
+  try {
+    const rawPbs = localStorage.getItem('tm_personal_bests');
+    if (rawPbs) {
+      const parsed = JSON.parse(rawPbs);
+      for (const tid of Object.keys(parsed)) {
+        localPersonalBests.set(tid, {
+          timeMs: parsed[tid].timeMs,
+          splits: parsed[tid].splits || [],
+          ghostFrames: [],
+          date: parsed[tid].date
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('Could not parse stored PBs:', e);
+  }
+}
+
 let roomRecordGhost = null;
 let currentRunGhostFrames = [];
 let ghostSampleAccum = 0;
 let showGhosts = true;
+
+function saveUserDataToLocalStorage() {
+  if (localStorage.getItem('tm_has_custom_name') !== 'true') return;
+  try {
+    localStorage.setItem('tm_player_name', playerName);
+    localStorage.setItem('tm_player_color', playerColor);
+    localStorage.setItem('tm_car_model', playerCarModel);
+
+    const pbs = {};
+    for (const [tid, pb] of localPersonalBests.entries()) {
+      pbs[tid] = { timeMs: pb.timeMs, splits: pb.splits || [], date: pb.date || Date.now() };
+    }
+    localStorage.setItem('tm_personal_bests', JSON.stringify(pbs));
+  } catch (err) {
+    console.warn('Could not save user data to localStorage:', err);
+  }
+}
+
+function updateProfileBadgeUI() {
+  const badge = document.getElementById('player-profile-badge');
+  const hint = document.getElementById('player-profile-hint');
+  const isSaved = localStorage.getItem('tm_has_custom_name') === 'true';
+  if (badge) {
+    badge.textContent = isSaved ? '⭐ Saved' : '👤 Guest';
+    badge.className = `profile-status-pill ${isSaved ? 'saved' : 'guest'}`;
+  }
+  if (hint) {
+    if (isSaved) {
+      hint.textContent = `Saved User: ${playerName}. Profile and track lap records remembered in local storage.`;
+      hint.className = 'profile-hint saved';
+    } else {
+      hint.textContent = 'Change nickname once to permanently save your user profile & records.';
+      hint.className = 'profile-hint';
+    }
+  }
+}
+
+function handleUsernameChange(val, explicit = false) {
+  const clean = (val || nameInput.value).trim().slice(0, 16);
+  if (!clean) {
+    nameInput.value = playerName;
+    return;
+  }
+  const isGuest = localStorage.getItem('tm_has_custom_name') !== 'true';
+  const initialGuest = sessionStorage.getItem('tm_guest_name');
+
+  // If user changes their username once, permanently remember user and their data in local storage
+  if (isGuest && (clean !== initialGuest || explicit)) {
+    saveCustomUser(clean);
+  } else if (!isGuest && clean !== playerName) {
+    saveCustomUser(clean);
+  } else {
+    playerName = clean;
+    nameInput.value = playerName;
+  }
+}
+
+function saveCustomUser(name) {
+  playerName = name;
+  nameInput.value = playerName;
+  localStorage.setItem('tm_has_custom_name', 'true');
+  localStorage.setItem('tm_player_name', playerName);
+  if (!localStorage.getItem('tm_user_id')) {
+    localStorage.setItem('tm_user_id', `usr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`);
+  }
+  saveUserDataToLocalStorage();
+  updateProfileBadgeUI();
+  showToast(`⭐ Welcome ${playerName}! Your username & data are now remembered in local storage.`);
+  if (socket && partyState.inParty) {
+    socket.emit('update_profile', { name: playerName, color: playerColor, carModel: playerCarModel });
+  }
+}
 
 // Input State
 const input = {
@@ -146,6 +267,7 @@ let builderBlocks = [
 // ==================== INITIALIZE PROFILE & MODE TABS ====================
 const nameInput = document.getElementById('player-name-input');
 nameInput.value = playerName;
+updateProfileBadgeUI();
 
 document.querySelectorAll('.color-swatch').forEach((btn) => {
   if (btn.dataset.color === playerColor) {
@@ -156,7 +278,9 @@ document.querySelectorAll('.color-swatch').forEach((btn) => {
     document.querySelectorAll('.color-swatch').forEach((b) => b.classList.remove('active'));
     btn.classList.add('active');
     playerColor = btn.dataset.color;
-    localStorage.setItem('tm_player_color', playerColor);
+    if (localStorage.getItem('tm_has_custom_name') === 'true') {
+      localStorage.setItem('tm_player_color', playerColor);
+    }
     renderer.updateCarColor(renderer.localCar, playerColor);
     if (socket && partyState.inParty) {
       socket.emit('update_profile', { name: playerName, color: playerColor, carModel: playerCarModel });
@@ -165,13 +289,18 @@ document.querySelectorAll('.color-swatch').forEach((btn) => {
 });
 
 nameInput.addEventListener('change', () => {
-  const clean = nameInput.value.trim().slice(0, 16);
-  if (clean) {
-    playerName = clean;
-    localStorage.setItem('tm_player_name', playerName);
-    if (socket && partyState.inParty) {
-      socket.emit('update_profile', { name: playerName, color: playerColor, carModel: playerCarModel });
-    }
+  handleUsernameChange(nameInput.value, true);
+});
+
+nameInput.addEventListener('blur', () => {
+  if (nameInput.value.trim() && nameInput.value.trim() !== playerName) {
+    handleUsernameChange(nameInput.value, true);
+  }
+});
+
+nameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    nameInput.blur();
   }
 });
 
@@ -229,7 +358,9 @@ function updateGarageUI() {
 
 function selectVehicleModel(modelId) {
   playerCarModel = modelId;
-  localStorage.setItem('tm_car_model', playerCarModel);
+  if (localStorage.getItem('tm_has_custom_name') === 'true') {
+    localStorage.setItem('tm_car_model', playerCarModel);
+  }
   renderer.setCarModel(renderer.localCar, playerCarModel);
   renderer.setCarModel(renderer.pbGhostCar, playerCarModel);
 
@@ -1018,8 +1149,10 @@ function showLobbyError(msg) {
 document.getElementById('btn-create-party').addEventListener('click', () => {
   sound.init();
   initSocket();
-  playerName = nameInput.value.trim().slice(0, 16) || playerName;
-  localStorage.setItem('tm_player_name', playerName);
+  const inputVal = nameInput.value.trim().slice(0, 16);
+  if (inputVal && inputVal !== playerName) {
+    handleUsernameChange(inputVal, true);
+  }
 
   const trackId = createTrackSelect.value || 'track_01';
   const totalRounds = Number(document.getElementById('create-rounds-select').value) || 3;
@@ -1051,8 +1184,10 @@ document.getElementById('btn-create-party').addEventListener('click', () => {
 document.getElementById('btn-join-party').addEventListener('click', () => {
   sound.init();
   initSocket();
-  playerName = nameInput.value.trim().slice(0, 16) || playerName;
-  localStorage.setItem('tm_player_name', playerName);
+  const inputVal = nameInput.value.trim().slice(0, 16);
+  if (inputVal && inputVal !== playerName) {
+    handleUsernameChange(inputVal, true);
+  }
 
   const code = document.getElementById('join-code-input').value.trim().toUpperCase();
   if (!code) {
@@ -1084,8 +1219,10 @@ document.getElementById('btn-join-party').addEventListener('click', () => {
 function startPracticeMode(trackId) {
   sound.init();
   initSocket();
-  playerName = nameInput.value.trim().slice(0, 16) || playerName;
-  localStorage.setItem('tm_player_name', playerName);
+  const inputVal = nameInput.value.trim().slice(0, 16);
+  if (inputVal && inputVal !== playerName) {
+    handleUsernameChange(inputVal, true);
+  }
 
   if (socket && partyState.inParty) {
     socket.emit('leave_party');
@@ -1931,8 +2068,10 @@ function handlePhysicsEvents(events) {
         localPersonalBests.set(currentTrack.id, {
           timeMs: ev.timeMs,
           splits: ev.splits,
-          ghostFrames: currentRunGhostFrames.slice()
+          ghostFrames: currentRunGhostFrames.slice(),
+          date: Date.now()
         });
+        saveUserDataToLocalStorage();
       }
 
       sound.playFinish(isNewPb);

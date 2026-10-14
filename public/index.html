@@ -195,7 +195,11 @@
       <div class="profile-section">
         <div class="field-group">
           <label for="player-name-input">DRIVER NICKNAME</label>
-          <input type="text" id="player-name-input" maxlength="16" placeholder="Enter your racer name..." value="SpeedRacer" />
+          <div class="nickname-input-wrap">
+            <input type="text" id="player-name-input" maxlength="16" placeholder="Enter custom name..." autocomplete="off" />
+            <span id="player-profile-badge" class="profile-status-pill guest">👤 Guest</span>
+          </div>
+          <small id="player-profile-hint" class="profile-hint">Change nickname once to permanently save your profile & lap records.</small>
         </div>
         <div class="field-group">
           <label>3D RACING VEHICLE</label>

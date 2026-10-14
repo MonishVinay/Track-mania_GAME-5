@@ -192,6 +192,19 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Reset leaderboards endpoint
+app.all('/api/reset-leaderboards', (req, res) => {
+  for (const tid of CAMPAIGN_TRACK_IDS) {
+    trackLeaderboards[tid] = [];
+  }
+  saveLeaderboardsToDisk();
+  io.emit('track_leaderboards_update', {
+    trackId: 'all',
+    leaderboards: trackLeaderboards
+  });
+  res.json({ success: true, message: 'All track leaderboards have been reset to empty.' });
+});
+
 // Fallback to index.html for SPA / invite links
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
