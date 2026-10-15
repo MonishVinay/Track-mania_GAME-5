@@ -142,7 +142,7 @@ loadLeaderboardsFromDisk();
  * Deduplicates by player name so each player occupies their single best record.
  * Returns { madeTop10: boolean, rank: number | null, list: Array }
  */
-function recordTrackTop10Time(trackId, playerName, color, timeMs, mode = 'practice') {
+function recordTrackTop10Time(trackId, playerName, color, timeMs, mode = 'practice', splits = null, ghostFrames = null, carModel = 'race') {
   if (!trackId || typeof timeMs !== 'number' || timeMs < 3000 || timeMs > 3600000) {
     return { madeTop10: false, rank: null, list: trackLeaderboards[trackId] || [] };
   }
@@ -156,6 +156,8 @@ function recordTrackTop10Time(trackId, playerName, color, timeMs, mode = 'practi
   const cleanColor = sanitizeColor(color);
   const cleanTime = Math.round(timeMs);
   const cleanMode = mode === 'online' ? 'ONLINE' : 'PRACTICE';
+  const cleanSplits = Array.isArray(splits) ? splits.slice(0, 32).map((n) => Math.round(Number(n) || 0)) : [];
+  const cleanCarModel = sanitizeString(carModel, 30) || 'race';
 
   const existingIndex = list.findIndex((e) => e.playerName.toLowerCase() === cleanName.toLowerCase());
   let entryId = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -165,7 +167,12 @@ function recordTrackTop10Time(trackId, playerName, color, timeMs, mode = 'practi
       list[existingIndex].timeMs = cleanTime;
       list[existingIndex].color = cleanColor;
       list[existingIndex].mode = cleanMode;
+      list[existingIndex].splits = cleanSplits.length > 0 ? cleanSplits : list[existingIndex].splits || [];
+      list[existingIndex].carModel = cleanCarModel;
       list[existingIndex].timestamp = Date.now();
+      if (Array.isArray(ghostFrames) && ghostFrames.length > 0) {
+        list[existingIndex].ghostFrames = ghostFrames;
+      }
       entryId = list[existingIndex].id;
     } else {
       // Slower than player's previous best on this track
@@ -178,6 +185,9 @@ function recordTrackTop10Time(trackId, playerName, color, timeMs, mode = 'practi
       color: cleanColor,
       timeMs: cleanTime,
       mode: cleanMode,
+      splits: cleanSplits,
+      carModel: cleanCarModel,
+      ghostFrames: Array.isArray(ghostFrames) && ghostFrames.length > 0 ? ghostFrames : null,
       timestamp: Date.now()
     });
   }
@@ -185,6 +195,13 @@ function recordTrackTop10Time(trackId, playerName, color, timeMs, mode = 'practi
   list.sort((a, b) => a.timeMs - b.timeMs);
   if (list.length > 10) {
     list.length = 10;
+  }
+
+  // Preserve ghost frames ONLY for the #1 record to maintain high performance & low payload
+  for (let i = 1; i < list.length; i++) {
+    if (list[i].ghostFrames) {
+      delete list[i].ghostFrames;
+    }
   }
 
   const rankIndex = list.findIndex((e) => e.id === entryId || e.playerName.toLowerCase() === cleanName.toLowerCase());
@@ -226,7 +243,10 @@ function mergeLeaderboards(incoming) {
       const cleanColor = sanitizeColor(inEntry.color);
       const cleanTime = Math.round(inEntry.timeMs);
       const cleanMode = inEntry.mode === 'ONLINE' ? 'ONLINE' : 'PRACTICE';
+      const cleanSplits = Array.isArray(inEntry.splits) ? inEntry.splits.slice(0, 32).map((n) => Math.round(Number(n) || 0)) : [];
+      const cleanCarModel = sanitizeString(inEntry.carModel, 30) || 'race';
       const cleanTimestamp = typeof inEntry.timestamp === 'number' ? inEntry.timestamp : Date.now();
+      const inGhostFrames = Array.isArray(inEntry.ghostFrames) && inEntry.ghostFrames.length > 0 ? inEntry.ghostFrames : null;
 
       const existingIdx = currentList.findIndex((e) => e.playerName.toLowerCase() === cleanName.toLowerCase());
       if (existingIdx !== -1) {
@@ -234,7 +254,12 @@ function mergeLeaderboards(incoming) {
           currentList[existingIdx].timeMs = cleanTime;
           currentList[existingIdx].color = cleanColor;
           currentList[existingIdx].mode = cleanMode;
+          currentList[existingIdx].splits = cleanSplits.length > 0 ? cleanSplits : currentList[existingIdx].splits || [];
+          currentList[existingIdx].carModel = cleanCarModel;
           currentList[existingIdx].timestamp = cleanTimestamp;
+          if (inGhostFrames) {
+            currentList[existingIdx].ghostFrames = inGhostFrames;
+          }
           changed = true;
         }
       } else {
@@ -244,6 +269,9 @@ function mergeLeaderboards(incoming) {
           color: cleanColor,
           timeMs: cleanTime,
           mode: cleanMode,
+          splits: cleanSplits,
+          carModel: cleanCarModel,
+          ghostFrames: inGhostFrames,
           timestamp: cleanTimestamp
         });
         changed = true;
@@ -254,6 +282,12 @@ function mergeLeaderboards(incoming) {
     if (currentList.length > 10) {
       currentList.length = 10;
       changed = true;
+    }
+
+    for (let i = 1; i < currentList.length; i++) {
+      if (currentList[i].ghostFrames) {
+        delete currentList[i].ghostFrames;
+      }
     }
   }
 
@@ -628,8 +662,11 @@ io.on('connection', (socket) => {
     const name = sanitizeString(data.playerName, 18) || 'Racer';
     const color = sanitizeColor(data.color);
     const timeMs = typeof data.timeMs === 'number' ? Math.round(data.timeMs) : 0;
+    const splits = Array.isArray(data.splits) ? data.splits : [];
+    const ghostFrames = Array.isArray(data.ghostFrames) ? data.ghostFrames : null;
+    const carModel = sanitizeString(data.carModel, 30) || 'race';
 
-    const result = recordTrackTop10Time(trackId, name, color, timeMs, 'practice');
+    const result = recordTrackTop10Time(trackId, name, color, timeMs, 'practice', splits, ghostFrames, carModel);
     if (typeof ack === 'function') {
       ack({
         ok: true,
@@ -907,7 +944,10 @@ io.on('connection', (socket) => {
     p.currentCp = 0;
 
     // Also record this lap into the global Track Top 10 Leaderboard!
-    const top10Result = recordTrackTop10Time(room.trackId, p.name, p.color, timeMs, 'online');
+    const runSplits = Array.isArray(data.splits) ? data.splits : [];
+    const runGhostFrames = Array.isArray(data.ghostFrames) ? data.ghostFrames : null;
+    const runCarModel = sanitizeString(data.carModel || p.carModel, 30) || 'race';
+    const top10Result = recordTrackTop10Time(room.trackId, p.name, p.color, timeMs, 'online', runSplits, runGhostFrames, runCarModel);
 
     const isPersonalBest = p.bestTime === null || timeMs < p.bestTime;
     const previousBest = p.bestTime;

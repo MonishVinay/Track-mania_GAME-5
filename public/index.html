@@ -55,6 +55,8 @@
     <!-- Right Quick Actions -->
     <div class="top-right-group">
       <button id="btn-host-maps" class="hud-btn accent-btn" title="Switch Track / Match Controls">🗺️ Tracks & Match</button>
+      <button id="btn-target-toggle" class="hud-btn" title="Toggle Delta & Ghost Target (PB vs Global Top)">🎯 Target: PB</button>
+      <button id="btn-open-settings" class="hud-btn" title="Game & Telemetry Settings">⚙️ Settings</button>
       <button id="btn-open-garage" class="hud-btn" title="Choose 3D Vehicle [V]">🏎️ Garage</button>
       <button id="btn-open-builder" class="hud-btn" title="Custom 3D Track Builder">🛠️ Builder</button>
       <button id="btn-cam-toggle" class="hud-btn" title="Switch Camera [C]">🎥 Cam</button>
@@ -91,7 +93,8 @@
     <div class="ctrl-row"><kbd>Space</kbd> / <kbd>S</kbd> + Steer <span>Drift / Air-Brake</span></div>
     <div class="ctrl-row"><kbd>Backspace</kbd> / <kbd>E</kbd> <span>Respawn CP</span></div>
     <div class="ctrl-row"><kbd>R</kbd> / <kbd>Del</kbd> <span>Restart Lap</span></div>
-    <div class="ctrl-row"><kbd>C</kbd> <span>Camera</span> &bull; <kbd>G</kbd> <span>Ghost</span></div>
+    <div class="ctrl-row"><kbd>T</kbd> <span>Target: PB / Global</span> &bull; <kbd>G</kbd> <span>Ghost</span></div>
+    <div class="ctrl-row"><kbd>C</kbd> <span>Camera</span> &bull; <kbd>O</kbd> <span>Settings</span></div>
   </aside>
 
   <!-- Center Overlays: Countdown, Split Delta, Finish Run Banner -->
@@ -143,8 +146,8 @@
       </div>
       <div id="hud-race-timer" class="main-timer">00:00.000</div>
       <div class="records-subrow">
-        <span>PB: <b id="hud-pb-time">--:--.---</b></span>
-        <span>TRACK #1: <b id="hud-room-best">--:--.---</b></span>
+        <span id="hud-chip-pb" class="record-target-chip active" title="Compare Delta & Ghost vs Your PB (Click to switch)">👤 PB: <b id="hud-pb-time">--:--.---</b></span>
+        <span id="hud-chip-global" class="record-target-chip" title="Compare Delta & Ghost vs Global Top #1 (Click to switch)">🌎 TOP #1: <b id="hud-room-best">--:--.---</b></span>
       </div>
     </div>
 
@@ -219,6 +222,21 @@
             <button type="button" class="color-swatch" data-color="#3b82f6" style="background:#3b82f6"></button>
             <button type="button" class="color-swatch" data-color="#f97316" style="background:#f97316"></button>
             <button type="button" class="color-swatch" data-color="#f8fafc" style="background:#f8fafc"></button>
+          </div>
+        </div>
+        <div class="field-group full-width" style="grid-column: 1 / -1; margin-top: 6px;">
+          <label>DELTA & GHOST CAR TARGET (IN-RACE COMPARISON)</label>
+          <div class="comp-options-grid mini">
+            <button type="button" id="lobby-target-pb" class="comp-option-card active" data-target="pb">
+              <div class="comp-card-badge">👤 PERSONAL BEST</div>
+              <div class="comp-card-title">Race vs Your PB</div>
+              <small>Checkpoint split deltas and cyan ghost car compare against your own fastest lap time.</small>
+            </button>
+            <button type="button" id="lobby-target-global" class="comp-option-card" data-target="global_top">
+              <div class="comp-card-badge global">🌎 GLOBAL TOP #1</div>
+              <div class="comp-card-title">Race vs Global #1 Record</div>
+              <small>Checkpoint split deltas and gold ghost car compare against the worldwide #1 record.</small>
+            </button>
           </div>
         </div>
       </div>
@@ -562,6 +580,69 @@
           <button id="btn-podium-next" class="primary-cta mini">⏭️ Start Next Round Now</button>
           <button id="btn-podium-new-match" class="secondary-cta mini hidden">🚀 Rematch Now</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. Settings & Ghost Comparison Modal -->
+  <div id="settings-modal" class="modal-backdrop hidden">
+    <div class="modal-card small-card settings-card">
+      <div class="modal-top-bar">
+        <div>
+          <span class="brand-badge">GAME TELEMETRY & GHOSTS</span>
+          <h2 style="margin-top:4px;">⚙️ Telemetry & Ghost Settings</h2>
+        </div>
+        <button id="btn-close-settings" class="close-x">✕</button>
+      </div>
+
+      <!-- Section 1: Comparison Target -->
+      <div class="settings-group">
+        <label class="settings-title">DELTA & GHOST CAR TARGET</label>
+        <p class="settings-desc">Choose which lap time your checkpoint split deltas (+/-) and on-track ghost car race against:</p>
+        <div class="comp-options-grid">
+          <div id="opt-target-pb" class="comp-option-card active" data-target="pb">
+            <div class="comp-card-badge">👤 PERSONAL BEST</div>
+            <h4>Personal Best (PB)</h4>
+            <p>Races against your own PB ghost car (cyan) and shows live +/- split delta at every checkpoint.</p>
+          </div>
+          <div id="opt-target-global" class="comp-option-card" data-target="global_top">
+            <div class="comp-card-badge global">🌎 GLOBAL TOP #1</div>
+            <h4>Global Top Record</h4>
+            <p>Races against the Global #1 record ghost car (gold) and shows live +/- split delta at every checkpoint.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 2: Ghost Visibility -->
+      <div class="settings-group" style="margin-top:14px;">
+        <label class="settings-title">GHOST CAR VISIBILITY</label>
+        <div class="settings-toggle-row">
+          <span>Display Ghost Car in Solo Practice Mode</span>
+          <button id="settings-ghost-toggle" class="toggle-pill active">ON</button>
+        </div>
+      </div>
+
+      <!-- Section 3: Audio & Sound -->
+      <div class="settings-group" style="margin-top:14px;">
+        <label class="settings-title">SOUND & AUDIO</label>
+        <div class="settings-toggle-row">
+          <span>Engine Sound & Checkpoint Audio</span>
+          <button id="settings-sound-toggle" class="toggle-pill active">ON</button>
+        </div>
+      </div>
+
+      <!-- Section 4: Camera View -->
+      <div class="settings-group" style="margin-top:14px;">
+        <label class="settings-title">DEFAULT CAMERA</label>
+        <select id="settings-cam-select" class="styled-select">
+          <option value="0">🎥 Dynamic Chase Camera (Default)</option>
+          <option value="1">🏎️ Close Action Camera</option>
+          <option value="2">👀 Bumper / Hood Camera</option>
+        </select>
+      </div>
+
+      <div class="modal-footer-row" style="margin-top:18px;">
+        <button id="btn-save-settings" class="primary-cta" style="width:100%;">✓ Save & Return to Game</button>
       </div>
     </div>
   </div>

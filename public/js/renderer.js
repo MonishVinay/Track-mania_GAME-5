@@ -221,7 +221,7 @@ export class GameRenderer {
     this.pbGhostCar.group.visible = false;
     this.actorsGroup.add(this.pbGhostCar.group);
 
-    this.recordGhostCar = this.createCarMesh('#ffd700', true, 'PARTY RECORD', 'race');
+    this.recordGhostCar = this.createCarMesh('#ffd700', true, 'GLOBAL #1 GHOST', 'race');
     this.recordGhostCar.group.visible = false;
     this.actorsGroup.add(this.recordGhostCar.group);
 

@@ -163,7 +163,10 @@ function mergeClientLeaderboards(incoming) {
       const cleanColor = inEntry.color || '#00f0ff';
       const cleanTime = Math.round(inEntry.timeMs);
       const cleanMode = inEntry.mode === 'ONLINE' ? 'ONLINE' : 'PRACTICE';
+      const cleanSplits = Array.isArray(inEntry.splits) ? inEntry.splits.slice(0, 32).map((n) => Math.round(Number(n) || 0)) : [];
+      const cleanCarModel = inEntry.carModel || 'race';
       const cleanTimestamp = typeof inEntry.timestamp === 'number' ? inEntry.timestamp : Date.now();
+      const inGhostFrames = Array.isArray(inEntry.ghostFrames) && inEntry.ghostFrames.length > 0 ? inEntry.ghostFrames : null;
 
       const existingIdx = currentList.findIndex(
         (e) => (e.playerName || '').toLowerCase() === cleanName.toLowerCase()
@@ -174,7 +177,12 @@ function mergeClientLeaderboards(incoming) {
           currentList[existingIdx].timeMs = cleanTime;
           currentList[existingIdx].color = cleanColor;
           currentList[existingIdx].mode = cleanMode;
+          currentList[existingIdx].splits = cleanSplits.length > 0 ? cleanSplits : currentList[existingIdx].splits || [];
+          currentList[existingIdx].carModel = cleanCarModel;
           currentList[existingIdx].timestamp = cleanTimestamp;
+          if (inGhostFrames) {
+            currentList[existingIdx].ghostFrames = inGhostFrames;
+          }
           changed = true;
         }
       } else {
@@ -184,6 +192,9 @@ function mergeClientLeaderboards(incoming) {
           color: cleanColor,
           timeMs: cleanTime,
           mode: cleanMode,
+          splits: cleanSplits,
+          carModel: cleanCarModel,
+          ghostFrames: inGhostFrames,
           timestamp: cleanTimestamp
         });
         changed = true;
@@ -194,6 +205,13 @@ function mergeClientLeaderboards(incoming) {
     if (currentList.length > 10) {
       currentList.length = 10;
       changed = true;
+    }
+
+    // Keep ghost frames only on the #1 record for minimal memory & fast JSON serialization
+    for (let i = 1; i < currentList.length; i++) {
+      if (currentList[i].ghostFrames) {
+        delete currentList[i].ghostFrames;
+      }
     }
   }
 
@@ -207,7 +225,7 @@ function mergeClientLeaderboards(incoming) {
  * Immediately records a lap time locally into Track Top 10 with deduplication,
  * guaranteeing zero UI delay and instantaneous HUD / leaderboard updates.
  */
-function recordLocalTrackTop10(trackId, pName, color, timeMs, mode = 'PRACTICE') {
+function recordLocalTrackTop10(trackId, pName, color, timeMs, mode = 'PRACTICE', splits = [], ghostFrames = null, carModel = 'race') {
   if (!trackId || typeof timeMs !== 'number' || timeMs < 3000 || timeMs > 3600000) {
     return { madeTop10: false, rank: null, list: trackLeaderboards[trackId] || [] };
   }
@@ -221,6 +239,8 @@ function recordLocalTrackTop10(trackId, pName, color, timeMs, mode = 'PRACTICE')
   const cleanColor = color || '#00f0ff';
   const cleanTime = Math.round(timeMs);
   const cleanMode = mode === 'ONLINE' ? 'ONLINE' : 'PRACTICE';
+  const cleanSplits = Array.isArray(splits) ? splits.slice(0, 32).map((n) => Math.round(Number(n) || 0)) : [];
+  const cleanCarModel = carModel || 'race';
 
   const existingIdx = list.findIndex(
     (e) => (e.playerName || '').toLowerCase() === cleanName.toLowerCase()
@@ -232,7 +252,12 @@ function recordLocalTrackTop10(trackId, pName, color, timeMs, mode = 'PRACTICE')
       list[existingIdx].timeMs = cleanTime;
       list[existingIdx].color = cleanColor;
       list[existingIdx].mode = cleanMode;
+      list[existingIdx].splits = cleanSplits.length > 0 ? cleanSplits : list[existingIdx].splits || [];
+      list[existingIdx].carModel = cleanCarModel;
       list[existingIdx].timestamp = Date.now();
+      if (Array.isArray(ghostFrames) && ghostFrames.length > 0) {
+        list[existingIdx].ghostFrames = ghostFrames;
+      }
       entryId = list[existingIdx].id;
     } else {
       return { madeTop10: false, rank: existingIdx + 1, list };
@@ -244,6 +269,9 @@ function recordLocalTrackTop10(trackId, pName, color, timeMs, mode = 'PRACTICE')
       color: cleanColor,
       timeMs: cleanTime,
       mode: cleanMode,
+      splits: cleanSplits,
+      carModel: cleanCarModel,
+      ghostFrames: Array.isArray(ghostFrames) && ghostFrames.length > 0 ? ghostFrames : null,
       timestamp: Date.now()
     });
   }
@@ -251,6 +279,12 @@ function recordLocalTrackTop10(trackId, pName, color, timeMs, mode = 'PRACTICE')
   list.sort((a, b) => a.timeMs - b.timeMs);
   if (list.length > 10) {
     list.length = 10;
+  }
+
+  for (let i = 1; i < list.length; i++) {
+    if (list[i].ghostFrames) {
+      delete list[i].ghostFrames;
+    }
   }
 
   const rankIdx = list.findIndex(
@@ -268,9 +302,133 @@ function recordLocalTrackTop10(trackId, pName, color, timeMs, mode = 'PRACTICE')
 }
 
 /**
+ * Generates smooth centerline ghost keyframes along track slices if no recorded ghost exists yet.
+ */
+function generateTrackCenterlineGhost(track, targetTimeMs) {
+  if (!track || !track.slices || track.slices.length === 0) return null;
+  const frames = [];
+  const dt = 50; // 20Hz
+  const totalFrames = Math.max(10, Math.ceil(targetTimeMs / dt));
+  const numSlices = track.slices.length;
+
+  for (let i = 0; i <= totalFrames; i++) {
+    const t = Math.min(targetTimeMs, i * dt);
+    const progress = t / targetTimeMs;
+    const sliceIndex = Math.min(numSlices - 1, Math.floor(progress * (numSlices - 1)));
+    const slice = track.slices[sliceIndex];
+    frames.push([
+      Math.round(t),
+      Number(slice.p.x.toFixed(2)),
+      Number((slice.p.y + 0.18).toFixed(2)),
+      Number(slice.p.z.toFixed(2)),
+      Number((slice.yaw || 0).toFixed(3)),
+      Number((slice.pitch || 0).toFixed(3)),
+      Number((slice.roll || 0).toFixed(3)),
+      0
+    ]);
+  }
+  return frames;
+}
+
+/**
+ * Retrieves ghost frames for the Global #1 record, with graceful fallback to centerline track replay.
+ */
+function getGlobalTopGhostFrames(track, top1) {
+  if (!track) return null;
+  if (top1 && Array.isArray(top1.ghostFrames) && top1.ghostFrames.length > 5) {
+    return top1.ghostFrames;
+  }
+  const pb = localPersonalBests.get(track.id);
+  if (pb && top1 && Math.abs(pb.timeMs - top1.timeMs) < 10 && Array.isArray(pb.ghostFrames) && pb.ghostFrames.length > 5) {
+    return pb.ghostFrames;
+  }
+  const targetTime = top1 && top1.timeMs ? top1.timeMs : (track.medals ? track.medals.author : 45000);
+  if (!track._cachedSyntheticGhost || track._cachedSyntheticGhostTime !== targetTime) {
+    track._cachedSyntheticGhost = generateTrackCenterlineGhost(track, targetTime);
+    track._cachedSyntheticGhostTime = targetTime;
+  }
+  return track._cachedSyntheticGhost;
+}
+
+// ==================== COMPARISON TARGET: PB VS GLOBAL TOP ====================
+let comparisonTarget = localStorage.getItem('tm_comparison_target') || 'pb';
+if (comparisonTarget !== 'pb' && comparisonTarget !== 'global_top') {
+  comparisonTarget = 'pb';
+}
+
+function updateComparisonTargetUI() {
+  const isGlobal = comparisonTarget === 'global_top';
+
+  // 1. Top bar button
+  const topBtn = document.getElementById('btn-target-toggle');
+  if (topBtn) {
+    topBtn.textContent = isGlobal ? '🎯 Target: Global #1' : '🎯 Target: PB';
+    topBtn.classList.toggle('active', isGlobal);
+    topBtn.title = isGlobal
+      ? 'Current Target: Global Top #1. Checkpoint deltas and ghost car compare against Global #1. Click to switch to PB.'
+      : 'Current Target: Personal Best (PB). Checkpoint deltas and ghost car compare against your PB. Click to switch to Global #1.';
+  }
+
+  // 2. Bottom HUD chips
+  const chipPb = document.getElementById('hud-chip-pb');
+  const chipGlobal = document.getElementById('hud-chip-global');
+  if (chipPb) chipPb.classList.toggle('active', !isGlobal);
+  if (chipGlobal) {
+    chipGlobal.classList.toggle('active', isGlobal);
+    chipGlobal.classList.toggle('global-top', isGlobal);
+  }
+
+  // 3. Lobby Modal target cards
+  const lobbyPb = document.getElementById('lobby-target-pb');
+  const lobbyGlobal = document.getElementById('lobby-target-global');
+  if (lobbyPb) lobbyPb.classList.toggle('active', !isGlobal);
+  if (lobbyGlobal) lobbyGlobal.classList.toggle('active', isGlobal);
+
+  // 4. Settings Modal target cards
+  const optPb = document.getElementById('opt-target-pb');
+  const optGlobal = document.getElementById('opt-target-global');
+  if (optPb) optPb.classList.toggle('active', !isGlobal);
+  if (optGlobal) optGlobal.classList.toggle('active', isGlobal);
+
+  // 5. Update ghost car in scene
+  if (renderer) {
+    if (!partyState.inParty && showGhosts) {
+      if (isGlobal) {
+        renderer.pbGhostCar.group.visible = false;
+        const top1 = (trackLeaderboards[currentTrack?.id] || [])[0];
+        if (top1) {
+          renderer.updateCarColor(renderer.recordGhostCar, top1.color || '#ffd700', `GLOBAL #1: ${top1.playerName}`);
+          if (top1.carModel) renderer.setCarModel(renderer.recordGhostCar, top1.carModel);
+        }
+      } else {
+        renderer.recordGhostCar.group.visible = false;
+        const pb = localPersonalBests.get(currentTrack?.id);
+        if (pb) {
+          renderer.updateCarColor(renderer.pbGhostCar, playerColor, `PB: ${playerName}`);
+          renderer.setCarModel(renderer.pbGhostCar, playerCarModel);
+        }
+      }
+    }
+  }
+}
+
+function setComparisonTarget(target) {
+  if (target !== 'pb' && target !== 'global_top') return;
+  comparisonTarget = target;
+  try {
+    localStorage.setItem('tm_comparison_target', comparisonTarget);
+  } catch (e) {
+    console.warn('Could not save comparison target:', e);
+  }
+  updateComparisonTargetUI();
+  showToast(`🎯 Delta & Ghost comparison target set to: ${comparisonTarget === 'global_top' ? 'Global Top #1 Record' : 'Personal Best (PB)'}`);
+}
+
+
+/**
  * Offline & network resilience: queues lap submissions locally if disconnected
  */
-function queuePendingLap(trackId, pName, color, timeMs, mode = 'PRACTICE') {
+function queuePendingLap(trackId, pName, color, timeMs, mode = 'PRACTICE', splits = [], ghostFrames = null, carModel = 'race') {
   try {
     const raw = localStorage.getItem('tm_pending_laps');
     const queue = raw ? JSON.parse(raw) : [];
@@ -280,6 +438,9 @@ function queuePendingLap(trackId, pName, color, timeMs, mode = 'PRACTICE') {
       color,
       timeMs,
       mode,
+      splits: Array.isArray(splits) ? splits : [],
+      ghostFrames: Array.isArray(ghostFrames) && ghostFrames.length > 0 ? ghostFrames : null,
+      carModel: carModel || 'race',
       timestamp: Date.now()
     });
     localStorage.setItem('tm_pending_laps', JSON.stringify(queue.slice(-50)));
@@ -634,6 +795,106 @@ if (confirmGarageBtn) confirmGarageBtn.addEventListener('click', closeGarageModa
 
 updateGarageUI();
 
+// ==================== COMPARISON TARGET & SETTINGS MODAL HANDLERS ====================
+const settingsModal = document.getElementById('settings-modal');
+const settingsGhostBtn = document.getElementById('settings-ghost-toggle');
+const settingsSoundBtn = document.getElementById('settings-sound-toggle');
+const settingsCamSelect = document.getElementById('settings-cam-select');
+
+function updateSettingsUI() {
+  updateComparisonTargetUI();
+  if (settingsGhostBtn) {
+    settingsGhostBtn.textContent = showGhosts ? 'ON' : 'OFF';
+    settingsGhostBtn.classList.toggle('active', showGhosts);
+  }
+  if (settingsSoundBtn) {
+    settingsSoundBtn.textContent = sound.muted ? 'OFF' : 'ON';
+    settingsSoundBtn.classList.toggle('active', !sound.muted);
+  }
+  if (settingsCamSelect) {
+    settingsCamSelect.value = String(renderer.cameraMode || 0);
+  }
+}
+
+function openSettingsModal() {
+  updateSettingsUI();
+  if (settingsModal) settingsModal.classList.remove('hidden');
+}
+
+function closeSettingsModal() {
+  if (settingsModal) settingsModal.classList.add('hidden');
+}
+
+document.getElementById('btn-open-settings')?.addEventListener('click', openSettingsModal);
+document.getElementById('btn-close-settings')?.addEventListener('click', closeSettingsModal);
+document.getElementById('btn-save-settings')?.addEventListener('click', closeSettingsModal);
+
+// Top bar target toggle button
+document.getElementById('btn-target-toggle')?.addEventListener('click', () => {
+  setComparisonTarget(comparisonTarget === 'pb' ? 'global_top' : 'pb');
+});
+
+// Bottom HUD clickable chips
+document.getElementById('hud-chip-pb')?.addEventListener('click', () => {
+  setComparisonTarget('pb');
+});
+
+document.getElementById('hud-chip-global')?.addEventListener('click', () => {
+  setComparisonTarget('global_top');
+});
+
+// Lobby menu comparison target cards
+document.getElementById('lobby-target-pb')?.addEventListener('click', () => {
+  setComparisonTarget('pb');
+});
+
+document.getElementById('lobby-target-global')?.addEventListener('click', () => {
+  setComparisonTarget('global_top');
+});
+
+// Settings modal comparison target cards
+document.getElementById('opt-target-pb')?.addEventListener('click', () => {
+  setComparisonTarget('pb');
+});
+
+document.getElementById('opt-target-global')?.addEventListener('click', () => {
+  setComparisonTarget('global_top');
+});
+
+if (settingsGhostBtn) {
+  settingsGhostBtn.addEventListener('click', () => {
+    showGhosts = !showGhosts;
+    settingsGhostBtn.textContent = showGhosts ? 'ON' : 'OFF';
+    settingsGhostBtn.classList.toggle('active', showGhosts);
+    const topGhostBtn = document.getElementById('btn-ghost-toggle');
+    if (topGhostBtn) topGhostBtn.classList.toggle('active', showGhosts);
+    updateComparisonTargetUI();
+    showToast(showGhosts ? '👻 Ghosts Enabled' : '👻 Ghosts Hidden');
+  });
+}
+
+if (settingsSoundBtn) {
+  settingsSoundBtn.addEventListener('click', () => {
+    const isMuted = sound.toggleMute();
+    settingsSoundBtn.textContent = isMuted ? 'OFF' : 'ON';
+    settingsSoundBtn.classList.toggle('active', !isMuted);
+    const topMuteBtn = document.getElementById('btn-mute-toggle');
+    if (topMuteBtn) topMuteBtn.textContent = isMuted ? '🔇' : '🔊';
+    showToast(isMuted ? '🔇 Audio Muted' : '🔊 Audio Enabled');
+  });
+}
+
+if (settingsCamSelect) {
+  settingsCamSelect.addEventListener('change', () => {
+    renderer.cameraMode = Number(settingsCamSelect.value) || 0;
+    const modeNames = ['Dynamic Chase', 'Close Action', 'Bumper / Hood'];
+    showToast(`🎥 Camera: ${modeNames[renderer.cameraMode] || 'Chase'}`);
+  });
+}
+
+updateComparisonTargetUI();
+
+
 // Lobby Mode Switch Tabs: 1) Online Multiplayer  2) Practice & Track Top 10
 const modeTabOnline = document.getElementById('mode-tab-online');
 const modeTabPractice = document.getElementById('mode-tab-practice');
@@ -861,12 +1122,12 @@ function loadTrack(trackDef, resetRoomGhost = true) {
   renderer.buildTrackScene(currentTrack);
   physics.setTrack(currentTrack);
 
-  if (resetRoomGhost || partyState.inParty) {
+  if (partyState.inParty) {
     roomRecordGhost = null;
     renderer.recordGhostCar.group.visible = false;
-  }
-  if (partyState.inParty) {
     renderer.pbGhostCar.group.visible = false;
+  } else {
+    updateComparisonTargetUI();
   }
 
   document.getElementById('hud-track-name').textContent = currentTrack.name;
@@ -879,6 +1140,7 @@ function loadTrack(trackDef, resetRoomGhost = true) {
   updateTop1RecordDisplay();
   renderCampaignTrackLists();
   renderLeaderboard();
+  updateComparisonTargetUI();
   startNewRun(true);
 }
 
@@ -1604,6 +1866,11 @@ document.getElementById('btn-ghost-toggle').addEventListener('click', (e) => {
     renderer.pbGhostCar.group.visible = false;
     renderer.recordGhostCar.group.visible = false;
   }
+  updateComparisonTargetUI();
+  if (settingsGhostBtn) {
+    settingsGhostBtn.textContent = showGhosts ? 'ON' : 'OFF';
+    settingsGhostBtn.classList.toggle('active', showGhosts);
+  }
   showToast(showGhosts ? '👻 Ghosts Enabled' : '👻 Ghosts Hidden');
 });
 
@@ -2121,6 +2388,14 @@ window.addEventListener('keydown', (e) => {
     if (!partyState.inParty) {
       document.getElementById('btn-ghost-toggle').click();
     }
+  } else if (code === 'KeyT') {
+    setComparisonTarget(comparisonTarget === 'pb' ? 'global_top' : 'pb');
+  } else if (code === 'KeyO') {
+    if (settingsModal && settingsModal.classList.contains('hidden')) {
+      openSettingsModal();
+    } else {
+      closeSettingsModal();
+    }
   } else if (code === 'KeyM') {
     document.getElementById('btn-mute-toggle').click();
   } else if (code === 'Tab') {
@@ -2264,15 +2539,35 @@ function handlePhysicsEvents(events) {
     } else if (ev.type === 'checkpoint') {
       renderer.markCheckpointPassed(ev.cpIndex);
 
+      let targetSplit = null;
+      let targetLabel = 'PB';
       const pb = localPersonalBests.get(currentTrack.id);
-      const prevSplit = pb && pb.splits ? pb.splits[ev.cpIndex - 1] : null;
-      const deltaMs = prevSplit !== null && prevSplit !== undefined ? ev.timeMs - prevSplit : null;
+      const top1 = (trackLeaderboards[currentTrack.id] || [])[0];
+
+      if (comparisonTarget === 'global_top') {
+        targetLabel = top1 ? `GLOBAL #1 (${top1.playerName})` : 'GLOBAL #1';
+        if (top1 && Array.isArray(top1.splits) && top1.splits[ev.cpIndex - 1] !== undefined) {
+          targetSplit = top1.splits[ev.cpIndex - 1];
+        } else if (top1 && top1.timeMs) {
+          targetSplit = Math.round((ev.cpIndex / ev.totalCps) * top1.timeMs);
+        } else if (currentTrack.medals && currentTrack.medals.author) {
+          targetSplit = Math.round((ev.cpIndex / ev.totalCps) * currentTrack.medals.author);
+          targetLabel = 'AUTHOR TARGET';
+        }
+      } else {
+        targetLabel = 'PB';
+        if (pb && Array.isArray(pb.splits) && pb.splits[ev.cpIndex - 1] !== undefined) {
+          targetSplit = pb.splits[ev.cpIndex - 1];
+        }
+      }
+
+      const deltaMs = targetSplit !== null && targetSplit !== undefined ? ev.timeMs - targetSplit : null;
       const isAhead = deltaMs === null || deltaMs <= 0;
 
       sound.playCheckpoint(isAhead);
 
       const popup = document.getElementById('split-popup');
-      document.getElementById('split-cp-label').textContent = `CHECKPOINT ${ev.cpIndex} / ${ev.totalCps}`;
+      document.getElementById('split-cp-label').textContent = `CHECKPOINT ${ev.cpIndex} / ${ev.totalCps} • VS ${targetLabel}`;
       document.getElementById('split-time-val').textContent = formatTimeMs(ev.timeMs);
 
       const deltaEl = document.getElementById('split-delta-val');
@@ -2305,6 +2600,7 @@ function handlePhysicsEvents(events) {
       const pb = localPersonalBests.get(currentTrack.id);
       const isNewPb = !pb || ev.timeMs < pb.timeMs;
       const oldPbTime = pb ? pb.timeMs : null;
+      const top1 = (trackLeaderboards[currentTrack.id] || [])[0];
 
       if (isNewPb) {
         localPersonalBests.set(currentTrack.id, {
@@ -2323,15 +2619,32 @@ function handlePhysicsEvents(events) {
       document.getElementById('finish-time-val').textContent = formatTimeMs(ev.timeMs);
 
       const deltaEl = document.getElementById('finish-delta-val');
-      if (isNewPb && oldPbTime !== null) {
-        deltaEl.textContent = `🔥 NEW PERSONAL BEST! (${formatTimeMs(ev.timeMs - oldPbTime, true)})`;
-        deltaEl.style.color = '#10b981';
-      } else if (isNewPb) {
-        deltaEl.textContent = '🔥 PERSONAL BEST RECORD SET!';
-        deltaEl.style.color = '#10b981';
+      if (comparisonTarget === 'global_top') {
+        const top1Time = top1 ? top1.timeMs : null;
+        if (top1Time !== null) {
+          const diff = ev.timeMs - top1Time;
+          if (diff <= 0) {
+            deltaEl.textContent = `🏆 BEAT GLOBAL #1 RECORD BY ${formatTimeMs(Math.abs(diff))}!`;
+            deltaEl.style.color = '#10b981';
+          } else {
+            deltaEl.textContent = `Delta vs Global #1: +${formatTimeMs(diff)}`;
+            deltaEl.style.color = '#fb7185';
+          }
+        } else {
+          deltaEl.textContent = '🏆 NEW GLOBAL #1 RECORD SET!';
+          deltaEl.style.color = '#10b981';
+        }
       } else {
-        deltaEl.textContent = `PB Delta: ${formatTimeMs(ev.timeMs - oldPbTime, true)}`;
-        deltaEl.style.color = '#fb7185';
+        if (isNewPb && oldPbTime !== null) {
+          deltaEl.textContent = `🔥 NEW PERSONAL BEST! (${formatTimeMs(ev.timeMs - oldPbTime, true)})`;
+          deltaEl.style.color = '#10b981';
+        } else if (isNewPb) {
+          deltaEl.textContent = '🔥 PERSONAL BEST RECORD SET!';
+          deltaEl.style.color = '#10b981';
+        } else {
+          deltaEl.textContent = `PB Delta: ${formatTimeMs(ev.timeMs - oldPbTime, true)}`;
+          deltaEl.style.color = '#fb7185';
+        }
       }
 
       const medalBadge = document.getElementById('finish-medal-badge');
@@ -2342,12 +2655,14 @@ function handlePhysicsEvents(events) {
         // Submit to Online Multiplayer Round + Global Track Top 10 (no ghost car in online multiplayer)
         socket.emit('finish_run', {
           timeMs: ev.timeMs,
-          splits: ev.splits
+          splits: ev.splits,
+          ghostFrames: currentRunGhostFrames.slice(),
+          carModel: playerCarModel
         });
-        recordLocalTrackTop10(currentTrack.id, playerName, playerColor, ev.timeMs, 'ONLINE');
+        recordLocalTrackTop10(currentTrack.id, playerName, playerColor, ev.timeMs, 'ONLINE', ev.splits, currentRunGhostFrames.slice(), playerCarModel);
       } else {
         // Submit Practice Lap to Global Track Top 10 Leaderboard!
-        const localRes = recordLocalTrackTop10(currentTrack.id, playerName, playerColor, ev.timeMs, 'PRACTICE');
+        const localRes = recordLocalTrackTop10(currentTrack.id, playerName, playerColor, ev.timeMs, 'PRACTICE', ev.splits, currentRunGhostFrames.slice(), playerCarModel);
         if (localRes.madeTop10) {
           showToast(`🌎 #${localRes.rank} on ${currentTrack.name} Top 10 Leaderboard!`);
           addChatLine(
@@ -2364,7 +2679,10 @@ function handlePhysicsEvents(events) {
               trackId: currentTrack.id,
               playerName,
               color: playerColor,
-              timeMs: ev.timeMs
+              timeMs: ev.timeMs,
+              splits: ev.splits,
+              ghostFrames: currentRunGhostFrames.slice(),
+              carModel: playerCarModel
             },
             (res) => {
               if (res && res.leaderboard) {
@@ -2372,18 +2690,20 @@ function handlePhysicsEvents(events) {
                 renderCampaignTrackLists();
                 updateTop1RecordDisplay();
                 renderLeaderboard();
+                updateComparisonTargetUI();
               }
             }
           );
         } else {
           // Resilient offline queuing and REST backup sync
-          queuePendingLap(currentTrack.id, playerName, playerColor, ev.timeMs, 'PRACTICE');
+          queuePendingLap(currentTrack.id, playerName, playerColor, ev.timeMs, 'PRACTICE', ev.splits, currentRunGhostFrames.slice(), playerCarModel);
           syncLeaderboardWithServer();
         }
       }
 
       updateTop1RecordDisplay();
       renderLeaderboard();
+      updateComparisonTargetUI();
       renderPracticeTrackSelector();
       if (selectedPracticeTrackId === currentTrack.id) {
         renderPracticeTop10Preview(currentTrack.id);
@@ -2480,15 +2800,28 @@ function animate(now) {
 
   // Ghost cars are ONLY rendered in Solo Practice mode (!partyState.inParty)
   if (showGhosts && !partyState.inParty && !physics.controlsLocked) {
-    const pb = localPersonalBests.get(currentTrack.id);
-    const pbState = pb ? sampleGhostAtTime(pb.ghostFrames, physics.raceElapsedMs) : null;
-    if (pbState) {
-      renderer.pbGhostCar.group.visible = true;
-      renderer.applyCarTransform(renderer.pbGhostCar, pbState, false);
-    } else {
+    if (comparisonTarget === 'global_top') {
+      const top1 = (trackLeaderboards[currentTrack.id] || [])[0];
+      const ghostFrames = getGlobalTopGhostFrames(currentTrack, top1);
+      const ghostState = ghostFrames ? sampleGhostAtTime(ghostFrames, physics.raceElapsedMs) : null;
+      if (ghostState) {
+        renderer.recordGhostCar.group.visible = true;
+        renderer.applyCarTransform(renderer.recordGhostCar, ghostState, false);
+      } else {
+        renderer.recordGhostCar.group.visible = false;
+      }
       renderer.pbGhostCar.group.visible = false;
+    } else {
+      const pb = localPersonalBests.get(currentTrack.id);
+      const pbState = pb ? sampleGhostAtTime(pb.ghostFrames, physics.raceElapsedMs) : null;
+      if (pbState) {
+        renderer.pbGhostCar.group.visible = true;
+        renderer.applyCarTransform(renderer.pbGhostCar, pbState, false);
+      } else {
+        renderer.pbGhostCar.group.visible = false;
+      }
+      renderer.recordGhostCar.group.visible = false;
     }
-    renderer.recordGhostCar.group.visible = false;
   } else {
     renderer.pbGhostCar.group.visible = false;
     renderer.recordGhostCar.group.visible = false;
