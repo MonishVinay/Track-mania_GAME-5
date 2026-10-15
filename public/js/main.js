@@ -117,6 +117,246 @@ let trackLeaderboards = {
   track_10: []
 };
 
+// Immediately restore cached global track leaderboards from localStorage if present
+try {
+  const cachedLb = localStorage.getItem('tm_cached_leaderboards');
+  if (cachedLb) {
+    const parsedLb = JSON.parse(cachedLb);
+    if (parsedLb && typeof parsedLb === 'object') {
+      for (const tid of Object.keys(parsedLb)) {
+        if (Array.isArray(parsedLb[tid])) {
+          trackLeaderboards[tid] = parsedLb[tid];
+        }
+      }
+    }
+  }
+} catch (e) {
+  console.warn('Could not load cached leaderboards:', e);
+}
+
+function persistLeaderboardsToLocalStorage() {
+  try {
+    localStorage.setItem('tm_cached_leaderboards', JSON.stringify(trackLeaderboards));
+  } catch (e) {
+    console.warn('Could not persist leaderboards to localStorage:', e);
+  }
+}
+
+/**
+ * Merges server or incoming leaderboards into local state with deduplication.
+ * Returns true if any records improved or changed.
+ */
+function mergeClientLeaderboards(incoming) {
+  if (!incoming || typeof incoming !== 'object') return false;
+  let changed = false;
+
+  for (const tid of Object.keys(trackLeaderboards)) {
+    if (!Array.isArray(trackLeaderboards[tid])) {
+      trackLeaderboards[tid] = [];
+    }
+    const currentList = trackLeaderboards[tid];
+    const incomingList = Array.isArray(incoming[tid]) ? incoming[tid] : [];
+
+    for (const inEntry of incomingList) {
+      if (!inEntry || typeof inEntry.timeMs !== 'number' || inEntry.timeMs < 3000 || inEntry.timeMs > 3600000) continue;
+      const cleanName = (inEntry.playerName || 'Racer').trim().slice(0, 18);
+      const cleanColor = inEntry.color || '#00f0ff';
+      const cleanTime = Math.round(inEntry.timeMs);
+      const cleanMode = inEntry.mode === 'ONLINE' ? 'ONLINE' : 'PRACTICE';
+      const cleanTimestamp = typeof inEntry.timestamp === 'number' ? inEntry.timestamp : Date.now();
+
+      const existingIdx = currentList.findIndex(
+        (e) => (e.playerName || '').toLowerCase() === cleanName.toLowerCase()
+      );
+
+      if (existingIdx !== -1) {
+        if (cleanTime < currentList[existingIdx].timeMs) {
+          currentList[existingIdx].timeMs = cleanTime;
+          currentList[existingIdx].color = cleanColor;
+          currentList[existingIdx].mode = cleanMode;
+          currentList[existingIdx].timestamp = cleanTimestamp;
+          changed = true;
+        }
+      } else {
+        currentList.push({
+          id: inEntry.id || `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          playerName: cleanName,
+          color: cleanColor,
+          timeMs: cleanTime,
+          mode: cleanMode,
+          timestamp: cleanTimestamp
+        });
+        changed = true;
+      }
+    }
+
+    currentList.sort((a, b) => a.timeMs - b.timeMs);
+    if (currentList.length > 10) {
+      currentList.length = 10;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    persistLeaderboardsToLocalStorage();
+  }
+  return changed;
+}
+
+/**
+ * Immediately records a lap time locally into Track Top 10 with deduplication,
+ * guaranteeing zero UI delay and instantaneous HUD / leaderboard updates.
+ */
+function recordLocalTrackTop10(trackId, pName, color, timeMs, mode = 'PRACTICE') {
+  if (!trackId || typeof timeMs !== 'number' || timeMs < 3000 || timeMs > 3600000) {
+    return { madeTop10: false, rank: null, list: trackLeaderboards[trackId] || [] };
+  }
+
+  if (!Array.isArray(trackLeaderboards[trackId])) {
+    trackLeaderboards[trackId] = [];
+  }
+
+  const list = trackLeaderboards[trackId];
+  const cleanName = (pName || 'Racer').trim().slice(0, 18);
+  const cleanColor = color || '#00f0ff';
+  const cleanTime = Math.round(timeMs);
+  const cleanMode = mode === 'ONLINE' ? 'ONLINE' : 'PRACTICE';
+
+  const existingIdx = list.findIndex(
+    (e) => (e.playerName || '').toLowerCase() === cleanName.toLowerCase()
+  );
+  let entryId = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+  if (existingIdx !== -1) {
+    if (cleanTime < list[existingIdx].timeMs) {
+      list[existingIdx].timeMs = cleanTime;
+      list[existingIdx].color = cleanColor;
+      list[existingIdx].mode = cleanMode;
+      list[existingIdx].timestamp = Date.now();
+      entryId = list[existingIdx].id;
+    } else {
+      return { madeTop10: false, rank: existingIdx + 1, list };
+    }
+  } else {
+    list.push({
+      id: entryId,
+      playerName: cleanName,
+      color: cleanColor,
+      timeMs: cleanTime,
+      mode: cleanMode,
+      timestamp: Date.now()
+    });
+  }
+
+  list.sort((a, b) => a.timeMs - b.timeMs);
+  if (list.length > 10) {
+    list.length = 10;
+  }
+
+  const rankIdx = list.findIndex(
+    (e) => e.id === entryId || (e.playerName || '').toLowerCase() === cleanName.toLowerCase()
+  );
+  const madeTop10 = rankIdx !== -1 && rankIdx < 10;
+
+  persistLeaderboardsToLocalStorage();
+
+  return {
+    madeTop10,
+    rank: madeTop10 ? rankIdx + 1 : null,
+    list
+  };
+}
+
+/**
+ * Offline & network resilience: queues lap submissions locally if disconnected
+ */
+function queuePendingLap(trackId, pName, color, timeMs, mode = 'PRACTICE') {
+  try {
+    const raw = localStorage.getItem('tm_pending_laps');
+    const queue = raw ? JSON.parse(raw) : [];
+    queue.push({
+      trackId,
+      playerName: pName,
+      color,
+      timeMs,
+      mode,
+      timestamp: Date.now()
+    });
+    localStorage.setItem('tm_pending_laps', JSON.stringify(queue.slice(-50)));
+  } catch (e) {
+    console.warn('Could not queue pending lap:', e);
+  }
+}
+
+function flushPendingLaps() {
+  try {
+    const raw = localStorage.getItem('tm_pending_laps');
+    if (!raw) return;
+    const queue = JSON.parse(raw);
+    if (!Array.isArray(queue) || queue.length === 0) return;
+
+    localStorage.removeItem('tm_pending_laps');
+
+    for (const lap of queue) {
+      if (socket && socket.connected) {
+        socket.emit('submit_practice_lap', lap, (res) => {
+          if (res && res.leaderboard) {
+            mergeClientLeaderboards({ [lap.trackId]: res.leaderboard });
+            renderCampaignTrackLists();
+            updateTop1RecordDisplay();
+            renderLeaderboard();
+          }
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('Could not flush pending laps:', e);
+  }
+}
+
+/**
+ * Synchronizes client-cached global track leaderboards with the server.
+ * Both socket and REST fallback are employed to guarantee persistence across Render container sleep/restarts.
+ */
+function syncLeaderboardWithServer() {
+  if (socket && socket.connected) {
+    socket.emit('sync_client_leaderboard', trackLeaderboards, (res) => {
+      if (res && res.leaderboards) {
+        if (mergeClientLeaderboards(res.leaderboards)) {
+          renderCampaignTrackLists();
+          updateTop1RecordDisplay();
+          renderLeaderboard();
+        }
+      }
+    });
+  }
+
+  fetch('/api/leaderboards/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(trackLeaderboards)
+  })
+    .then((r) => r.json())
+    .then((data) => {
+      if (data && data.leaderboards) {
+        if (mergeClientLeaderboards(data.leaderboards)) {
+          renderCampaignTrackLists();
+          updateTop1RecordDisplay();
+          renderLeaderboard();
+        }
+      }
+    })
+    .catch((err) => {
+      console.warn('Leaderboard sync HTTP note:', err.message);
+    });
+}
+
+window.addEventListener('online', () => {
+  syncLeaderboardWithServer();
+  flushPendingLaps();
+});
+
+
 // Party / Multiplayer State (3-5 Rounds + Pre-Game Waiting Lobby)
 let socket = null;
 let serverClockOffset = 0;
@@ -683,6 +923,8 @@ function initSocket() {
   socket.on('connect', () => {
     document.getElementById('conn-dot').classList.remove('offline');
     document.getElementById('conn-dot').classList.add('online');
+    syncLeaderboardWithServer();
+    flushPendingLaps();
   });
 
   socket.on('disconnect', () => {
@@ -693,7 +935,7 @@ function initSocket() {
   // Receive Global Track Top 10 Leaderboards on Connect & Updates
   socket.on('track_leaderboards_init', (allBoards) => {
     if (allBoards && typeof allBoards === 'object') {
-      trackLeaderboards = allBoards;
+      mergeClientLeaderboards(allBoards);
       renderCampaignTrackLists();
       updateTop1RecordDisplay();
       renderLeaderboard();
@@ -702,7 +944,7 @@ function initSocket() {
 
   socket.on('track_leaderboards_update', (payload) => {
     if (payload && payload.leaderboards) {
-      trackLeaderboards = payload.leaderboards;
+      mergeClientLeaderboards(payload.leaderboards);
       renderCampaignTrackLists();
       updateTop1RecordDisplay();
       renderLeaderboard();
@@ -2102,31 +2344,50 @@ function handlePhysicsEvents(events) {
           timeMs: ev.timeMs,
           splits: ev.splits
         });
-      } else if (socket) {
+        recordLocalTrackTop10(currentTrack.id, playerName, playerColor, ev.timeMs, 'ONLINE');
+      } else {
         // Submit Practice Lap to Global Track Top 10 Leaderboard!
-        socket.emit(
-          'submit_practice_lap',
-          {
-            trackId: currentTrack.id,
-            playerName,
-            color: playerColor,
-            timeMs: ev.timeMs
-          },
-          (res) => {
-            if (res && res.madeTop10) {
-              showToast(`🌎 #${res.rank} on ${currentTrack.name} Top 10 Leaderboard!`);
-              addChatLine(
-                `🌎 Claimed #${res.rank} on ${currentTrack.name} Top 10 (${formatTimeMs(ev.timeMs)})!`,
-                null,
-                true
-              );
+        const localRes = recordLocalTrackTop10(currentTrack.id, playerName, playerColor, ev.timeMs, 'PRACTICE');
+        if (localRes.madeTop10) {
+          showToast(`🌎 #${localRes.rank} on ${currentTrack.name} Top 10 Leaderboard!`);
+          addChatLine(
+            `🌎 Claimed #${localRes.rank} on ${currentTrack.name} Top 10 (${formatTimeMs(ev.timeMs)})!`,
+            null,
+            true
+          );
+        }
+
+        if (socket && socket.connected) {
+          socket.emit(
+            'submit_practice_lap',
+            {
+              trackId: currentTrack.id,
+              playerName,
+              color: playerColor,
+              timeMs: ev.timeMs
+            },
+            (res) => {
+              if (res && res.leaderboard) {
+                mergeClientLeaderboards({ [currentTrack.id]: res.leaderboard });
+                renderCampaignTrackLists();
+                updateTop1RecordDisplay();
+                renderLeaderboard();
+              }
             }
-          }
-        );
+          );
+        } else {
+          // Resilient offline queuing and REST backup sync
+          queuePendingLap(currentTrack.id, playerName, playerColor, ev.timeMs, 'PRACTICE');
+          syncLeaderboardWithServer();
+        }
       }
 
       updateTop1RecordDisplay();
       renderLeaderboard();
+      renderPracticeTrackSelector();
+      if (selectedPracticeTrackId === currentTrack.id) {
+        renderPracticeTop10Preview(currentTrack.id);
+      }
     }
   }
 }
@@ -2311,4 +2572,6 @@ function animate(now) {
 
 renderer.overviewMode = true;
 initSocket();
+syncLeaderboardWithServer();
 requestAnimationFrame(animate);
+

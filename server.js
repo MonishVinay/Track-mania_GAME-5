@@ -19,6 +19,7 @@ const io = new Server(server, {
 });
 
 app.use(compression());
+app.use(express.json());
 
 // Serve Three.js directly from node_modules for zero external CDN dependency
 app.use(
@@ -138,6 +139,7 @@ loadLeaderboardsFromDisk();
 
 /**
  * Records a completed lap time into the Track's Top 10 Leaderboard (counts both Online & Practice).
+ * Deduplicates by player name so each player occupies their single best record.
  * Returns { madeTop10: boolean, rank: number | null, list: Array }
  */
 function recordTrackTop10Time(trackId, playerName, color, timeMs, mode = 'practice') {
@@ -150,24 +152,44 @@ function recordTrackTop10Time(trackId, playerName, color, timeMs, mode = 'practi
   }
 
   const list = trackLeaderboards[trackId];
-  const entry = {
-    id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-    playerName: sanitizeString(playerName, 18) || 'Racer',
-    color: sanitizeColor(color),
-    timeMs: Math.round(timeMs),
-    mode: mode === 'online' ? 'ONLINE' : 'PRACTICE',
-    timestamp: Date.now()
-  };
+  const cleanName = sanitizeString(playerName, 18) || 'Racer';
+  const cleanColor = sanitizeColor(color);
+  const cleanTime = Math.round(timeMs);
+  const cleanMode = mode === 'online' ? 'ONLINE' : 'PRACTICE';
 
-  list.push(entry);
+  const existingIndex = list.findIndex((e) => e.playerName.toLowerCase() === cleanName.toLowerCase());
+  let entryId = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+  if (existingIndex !== -1) {
+    if (cleanTime < list[existingIndex].timeMs) {
+      list[existingIndex].timeMs = cleanTime;
+      list[existingIndex].color = cleanColor;
+      list[existingIndex].mode = cleanMode;
+      list[existingIndex].timestamp = Date.now();
+      entryId = list[existingIndex].id;
+    } else {
+      // Slower than player's previous best on this track
+      return { madeTop10: false, rank: existingIndex + 1, list };
+    }
+  } else {
+    list.push({
+      id: entryId,
+      playerName: cleanName,
+      color: cleanColor,
+      timeMs: cleanTime,
+      mode: cleanMode,
+      timestamp: Date.now()
+    });
+  }
+
   list.sort((a, b) => a.timeMs - b.timeMs);
-
-  const rankIndex = list.findIndex((e) => e.id === entry.id);
   if (list.length > 10) {
     list.length = 10;
   }
 
+  const rankIndex = list.findIndex((e) => e.id === entryId || e.playerName.toLowerCase() === cleanName.toLowerCase());
   const madeTop10 = rankIndex !== -1 && rankIndex < 10;
+
   if (madeTop10) {
     saveLeaderboardsToDisk();
     io.emit('track_leaderboards_update', {
@@ -183,6 +205,68 @@ function recordTrackTop10Time(trackId, playerName, color, timeMs, mode = 'practi
   };
 }
 
+/**
+ * Merges external or client-cached leaderboards into the canonical server leaderboards.
+ * Essential for Render free-tier: re-hydrates the server after container spin-downs!
+ */
+function mergeLeaderboards(incoming) {
+  if (!incoming || typeof incoming !== 'object') return false;
+  let changed = false;
+
+  for (const tid of CAMPAIGN_TRACK_IDS) {
+    if (!Array.isArray(trackLeaderboards[tid])) {
+      trackLeaderboards[tid] = [];
+    }
+    const currentList = trackLeaderboards[tid];
+    const incomingList = Array.isArray(incoming[tid]) ? incoming[tid] : [];
+
+    for (const inEntry of incomingList) {
+      if (!inEntry || typeof inEntry.timeMs !== 'number' || inEntry.timeMs < 3000 || inEntry.timeMs > 3600000) continue;
+      const cleanName = sanitizeString(inEntry.playerName, 18) || 'Racer';
+      const cleanColor = sanitizeColor(inEntry.color);
+      const cleanTime = Math.round(inEntry.timeMs);
+      const cleanMode = inEntry.mode === 'ONLINE' ? 'ONLINE' : 'PRACTICE';
+      const cleanTimestamp = typeof inEntry.timestamp === 'number' ? inEntry.timestamp : Date.now();
+
+      const existingIdx = currentList.findIndex((e) => e.playerName.toLowerCase() === cleanName.toLowerCase());
+      if (existingIdx !== -1) {
+        if (cleanTime < currentList[existingIdx].timeMs) {
+          currentList[existingIdx].timeMs = cleanTime;
+          currentList[existingIdx].color = cleanColor;
+          currentList[existingIdx].mode = cleanMode;
+          currentList[existingIdx].timestamp = cleanTimestamp;
+          changed = true;
+        }
+      } else {
+        currentList.push({
+          id: inEntry.id || `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          playerName: cleanName,
+          color: cleanColor,
+          timeMs: cleanTime,
+          mode: cleanMode,
+          timestamp: cleanTimestamp
+        });
+        changed = true;
+      }
+    }
+
+    currentList.sort((a, b) => a.timeMs - b.timeMs);
+    if (currentList.length > 10) {
+      currentList.length = 10;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    saveLeaderboardsToDisk();
+    io.emit('track_leaderboards_update', {
+      trackId: 'all',
+      leaderboards: trackLeaderboards
+    });
+  }
+  return changed;
+}
+
 // Health check endpoint for Render
 app.get('/health', (req, res) => {
   res.status(200).json({
@@ -190,6 +274,16 @@ app.get('/health', (req, res) => {
     uptime: process.uptime(),
     rooms: rooms.size
   });
+});
+
+// Global Leaderboards REST API
+app.get('/api/leaderboards', (req, res) => {
+  res.json(trackLeaderboards);
+});
+
+app.post('/api/leaderboards/sync', (req, res) => {
+  const changed = mergeLeaderboards(req.body);
+  res.json({ ok: true, changed, leaderboards: trackLeaderboards });
 });
 
 // Reset leaderboards endpoint
@@ -517,6 +611,14 @@ io.on('connection', (socket) => {
   socket.on('get_track_leaderboards', (ack) => {
     if (typeof ack === 'function') {
       ack(trackLeaderboards);
+    }
+  });
+
+  // Client sync on connect: if client has cached leaderboards or PBs, merge with server
+  socket.on('sync_client_leaderboard', (clientBoards, ack) => {
+    mergeLeaderboards(clientBoards);
+    if (typeof ack === 'function') {
+      ack({ ok: true, leaderboards: trackLeaderboards });
     }
   });
 
