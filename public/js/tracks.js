@@ -244,7 +244,11 @@ export function compileTrack(trackDef) {
         const dy = slice.p.y - prev.p.y;
         const dz = slice.p.z - prev.p.z;
         const segLenSq = dx * dx + dy * dy + dz * dz || 1;
-        const maxW = Math.max(prev.halfWidth, slice.halfWidth) + 2.5;
+        const maxBankDrop = Math.max(
+          Math.abs(prev.r.y) * prev.halfWidth,
+          Math.abs(slice.r.y) * slice.halfWidth
+        );
+        const maxW = Math.max(prev.halfWidth, slice.halfWidth) + 4.0;
 
         const seg = {
           index: segments.length,
@@ -258,12 +262,12 @@ export function compileTrack(trackDef) {
           turnSign,
           hasLeftWall: walls === 'both' || walls === 'left',
           hasRightWall: walls === 'both' || walls === 'right',
-          minX: Math.min(prev.p.x, slice.p.x) - maxW,
-          maxX: Math.max(prev.p.x, slice.p.x) + maxW,
-          minY: Math.min(prev.p.y, slice.p.y) - 8.0,
-          maxY: Math.max(prev.p.y, slice.p.y) + 38.0,
-          minZ: Math.min(prev.p.z, slice.p.z) - maxW,
-          maxZ: Math.max(prev.p.z, slice.p.z) + maxW
+          minX: Math.min(prev.p.x, slice.p.x) - maxW - maxBankDrop,
+          maxX: Math.max(prev.p.x, slice.p.x) + maxW + maxBankDrop,
+          minY: Math.min(prev.p.y, slice.p.y) - maxBankDrop - 24.0,
+          maxY: Math.max(prev.p.y, slice.p.y) + maxBankDrop + 48.0,
+          minZ: Math.min(prev.p.z, slice.p.z) - maxW - maxBankDrop,
+          maxZ: Math.max(prev.p.z, slice.p.z) + maxW + maxBankDrop
         };
         segments.push(seg);
       }
@@ -297,7 +301,7 @@ export function compileTrack(trackDef) {
   let minLowestSlabY = Infinity;
   for (let i = 0; i < slices.length; i++) {
     const sl = slices[i];
-    const edgeLowY = sl.p.y - sl.halfWidth * Math.abs(Math.sin(sl.bank)) - 1.5;
+    const edgeLowY = sl.p.y - sl.halfWidth * Math.abs(sl.r.y) - 1.5;
     if (edgeLowY < minLowestSlabY) minLowestSlabY = edgeLowY;
   }
   if (minLowestSlabY < 3.0) {
@@ -330,7 +334,8 @@ export function compileTrack(trackDef) {
 
   for (let i = 0; i < slices.length; i++) {
     const p = slices[i].p;
-    if (p.y < minTrackY) minTrackY = p.y;
+    const lowY = p.y - Math.abs(slices[i].r.y) * slices[i].halfWidth - 3.0;
+    if (lowY < minTrackY) minTrackY = lowY;
     if (p.x < minTrackX) minTrackX = p.x;
     if (p.x > maxTrackX) maxTrackX = p.x;
     if (p.z < minTrackZ) minTrackZ = p.z;
@@ -395,7 +400,7 @@ export function compileTrack(trackDef) {
       r: { ...spawnSlice.r }
     },
     finishGate: finishSlice,
-    outOfBoundsY: minTrackY - 30
+    outOfBoundsY: minTrackY - 45.0
   };
 }
 

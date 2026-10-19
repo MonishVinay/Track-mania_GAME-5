@@ -279,9 +279,9 @@ export class CarPhysics {
       const vert = dot(rel, U);
       const lon = dot(rel, F);
 
-      if (Math.abs(lat) > W + 3.2) continue;
-      if (Math.abs(lon) > seg.len * 0.7 + 2.2) continue;
-      if (vert < -3.2 || vert > 32.0) continue;
+      if (Math.abs(lat) > W + 7.5) continue;
+      if (Math.abs(lon) > seg.len * 0.75 + 3.0) continue;
+      if (vert < -8.5 || vert > 45.0) continue;
 
       // Prefer segments vertically close to RIDE_HEIGHT and sequentially continuous
       const indexDelta = Math.abs(seg.index - this.lastSegIndex);
@@ -575,7 +575,11 @@ export class CarPhysics {
       const { P, U, R, F, W, seg, vert, lat } = nextHit;
 
       // Side Wall & Center Split Island Physics (Tangible crash slowdown & realistic wall-scrape drag!)
-      if (vert >= -1.2 && vert <= 4.5) {
+      if (vert >= -6.0 && vert <= 16.0) {
+        const isBankedIce =
+          (this.surface === 'ice' || seg.surface === 'ice') &&
+          (Math.abs(seg.s0.bank) > 0.15 || Math.abs(seg.s1.bank) > 0.15);
+        const wallScrapeFriction = isBankedIce ? 0.35 : 1.6;
         const maxLat = W - CAR_HALF_WIDTH;
         if (seg.hasRightWall && lat > maxLat) {
           const penetration = lat - maxLat;
@@ -584,7 +588,7 @@ export class CarPhysics {
           this.pos.z -= R.z * penetration;
 
           // Continuous wall-scraping friction drag while brushing/grinding against barrier
-          this.forwardSpeedMs *= Math.max(0.4, 1.0 - 1.6 * dt);
+          this.forwardSpeedMs *= Math.max(0.4, 1.0 - wallScrapeFriction * dt);
 
           const vWall = dot(this.vel, R);
           if (vWall > 0) {
@@ -596,12 +600,16 @@ export class CarPhysics {
             // Gently guide car yaw parallel to the wall so it deflects cleanly without spinning 180
             const segYaw = lerp(seg.s0.yaw, seg.s1.yaw, nextHit.t);
             const yawDiff = wrapAngle(segYaw - this.yaw);
-            this.yaw = wrapAngle(this.yaw + yawDiff * clamp(5.5 * dt, 0, 0.35));
+            const steerGuidance = isBankedIce ? 8.5 : 5.5;
+            this.yaw = wrapAngle(this.yaw + yawDiff * clamp(steerGuidance * dt, 0, 0.45));
 
             // Instant crash speed reduction proportional to impact velocity
-            if (vWall > 3.0 && this.wallHitCooldown <= 0) {
+            const minImpactSpd = isBankedIce ? 5.5 : 3.0;
+            if (vWall > minImpactSpd && this.wallHitCooldown <= 0) {
               this.wallHitCooldown = 0.20;
-              const crashPenalty = clamp(0.08 + ((vWall - 3.0) / 28) * 0.20, 0.08, 0.28);
+              const crashPenalty = isBankedIce
+                ? clamp(0.04 + ((vWall - minImpactSpd) / 36) * 0.12, 0.04, 0.16)
+                : clamp(0.08 + ((vWall - 3.0) / 28) * 0.20, 0.08, 0.28);
               this.forwardSpeedMs *= (1.0 - crashPenalty);
 
               if (this.grounded && this.forward) {
@@ -630,7 +638,7 @@ export class CarPhysics {
           this.pos.z += R.z * penetration;
 
           // Continuous wall-scraping friction drag
-          this.forwardSpeedMs *= Math.max(0.4, 1.0 - 1.6 * dt);
+          this.forwardSpeedMs *= Math.max(0.4, 1.0 - wallScrapeFriction * dt);
 
           const vWall = dot(this.vel, R);
           if (vWall < 0) {
@@ -641,11 +649,15 @@ export class CarPhysics {
 
             const segYaw = lerp(seg.s0.yaw, seg.s1.yaw, nextHit.t);
             const yawDiff = wrapAngle(segYaw - this.yaw);
-            this.yaw = wrapAngle(this.yaw + yawDiff * clamp(5.5 * dt, 0, 0.35));
+            const steerGuidance = isBankedIce ? 8.5 : 5.5;
+            this.yaw = wrapAngle(this.yaw + yawDiff * clamp(steerGuidance * dt, 0, 0.45));
 
-            if (Math.abs(vWall) > 3.0 && this.wallHitCooldown <= 0) {
+            const minImpactSpd = isBankedIce ? 5.5 : 3.0;
+            if (Math.abs(vWall) > minImpactSpd && this.wallHitCooldown <= 0) {
               this.wallHitCooldown = 0.20;
-              const crashPenalty = clamp(0.08 + ((Math.abs(vWall) - 3.0) / 28) * 0.20, 0.08, 0.28);
+              const crashPenalty = isBankedIce
+                ? clamp(0.04 + ((Math.abs(vWall) - minImpactSpd) / 36) * 0.12, 0.04, 0.16)
+                : clamp(0.08 + ((Math.abs(vWall) - 3.0) / 28) * 0.20, 0.08, 0.28);
               this.forwardSpeedMs *= (1.0 - crashPenalty);
 
               if (this.grounded && this.forward) {
@@ -724,12 +736,21 @@ export class CarPhysics {
         z: this.pos.z - P.z
       };
       const newVert = dot(relAfterWall, U);
+      const newLat = dot(relAfterWall, R);
       const vNormal = dot(this.vel, U);
 
       // Keep car glued on walled road blocks over crests; launch cleanly on jump takeoff ramps
       const isJumpRamp = !seg.hasLeftWall && !seg.hasRightWall;
-      const maxStickGap = this.grounded ? (isJumpRamp ? 0.35 : 1.65) : 0.28;
-      const maxStickNormalVel = isJumpRamp ? 4.5 : 24.0;
+      const isBankedOrIce =
+        this.surface === 'ice' ||
+        seg.surface === 'ice' ||
+        Math.abs(seg.s0.bank) > 0.16 ||
+        Math.abs(seg.s1.bank) > 0.16;
+
+      const maxStickGap = this.grounded
+        ? (isJumpRamp ? 0.35 : isBankedOrIce ? 3.6 : 1.85)
+        : (isJumpRamp ? 0.28 : isBankedOrIce ? 2.8 : 0.45);
+      const maxStickNormalVel = isJumpRamp ? 4.5 : isBankedOrIce ? 38.0 : 26.0;
 
       if (newVert <= RIDE_HEIGHT + maxStickGap && vNormal <= maxStickNormalVel) {
         const diff = RIDE_HEIGHT - newVert;
@@ -750,6 +771,21 @@ export class CarPhysics {
             this.events.push({ type: 'landed', intensity: impact });
           }
         }
+
+        if (vNormal < 0) {
+          this.vel.x -= U.x * vNormal;
+          this.vel.y -= U.y * vNormal;
+          this.vel.z -= U.z * vNormal;
+        }
+
+        this.grounded = true;
+        this.airTime = 0;
+      } else if (!isJumpRamp && isBankedOrIce && Math.abs(newLat) <= W + 2.5) {
+        // Magnetic retention on banked ice / bobsled curves - NEVER fall through or un-ground!
+        const diff = RIDE_HEIGHT - newVert;
+        this.pos.x += U.x * diff;
+        this.pos.y += U.y * diff;
+        this.pos.z += U.z * diff;
 
         if (vNormal < 0) {
           this.vel.x -= U.x * vNormal;

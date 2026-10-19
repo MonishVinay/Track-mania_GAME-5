@@ -350,6 +350,22 @@ function getGlobalTopGhostFrames(track, top1) {
   return track._cachedSyntheticGhost;
 }
 
+/**
+ * Retrieves ghost frames for the Personal Best (PB) record, with graceful fallback to centerline track replay.
+ */
+function getPBGhostFrames(track, pb) {
+  if (!track || !pb) return null;
+  if (Array.isArray(pb.ghostFrames) && pb.ghostFrames.length > 5) {
+    return pb.ghostFrames;
+  }
+  if (!pb.timeMs) return null;
+  if (!track._cachedPbSyntheticGhost || track._cachedPbSyntheticGhostTime !== pb.timeMs) {
+    track._cachedPbSyntheticGhost = generateTrackCenterlineGhost(track, pb.timeMs);
+    track._cachedPbSyntheticGhostTime = pb.timeMs;
+  }
+  return track._cachedPbSyntheticGhost;
+}
+
 // ==================== COMPARISON TARGET: PB VS GLOBAL TOP ====================
 let comparisonTarget = localStorage.getItem('tm_comparison_target') || 'pb';
 if (comparisonTarget !== 'pb' && comparisonTarget !== 'global_top') {
@@ -456,19 +472,18 @@ function flushPendingLaps() {
     const queue = JSON.parse(raw);
     if (!Array.isArray(queue) || queue.length === 0) return;
 
+    if (!socket || !socket.connected) return;
     localStorage.removeItem('tm_pending_laps');
 
     for (const lap of queue) {
-      if (socket && socket.connected) {
-        socket.emit('submit_practice_lap', lap, (res) => {
-          if (res && res.leaderboard) {
-            mergeClientLeaderboards({ [lap.trackId]: res.leaderboard });
-            renderCampaignTrackLists();
-            updateTop1RecordDisplay();
-            renderLeaderboard();
-          }
-        });
-      }
+      socket.emit('submit_practice_lap', lap, (res) => {
+        if (res && res.leaderboard) {
+          mergeClientLeaderboards({ [lap.trackId]: res.leaderboard });
+          renderCampaignTrackLists();
+          updateTop1RecordDisplay();
+          renderLeaderboard();
+        }
+      });
     }
   } catch (e) {
     console.warn('Could not flush pending laps:', e);
@@ -480,6 +495,13 @@ function flushPendingLaps() {
  * Both socket and REST fallback are employed to guarantee persistence across Render container sleep/restarts.
  */
 function syncLeaderboardWithServer() {
+  // Ensure all personal bests on this device are reflected in trackLeaderboards before syncing
+  for (const [tid, pb] of localPersonalBests.entries()) {
+    if (pb && typeof pb.timeMs === 'number' && pb.timeMs > 3000) {
+      recordLocalTrackTop10(tid, playerName, playerColor, pb.timeMs, 'PRACTICE', pb.splits || [], null, playerCarModel);
+    }
+  }
+
   if (socket && socket.connected) {
     socket.emit('sync_client_leaderboard', trackLeaderboards, (res) => {
       if (res && res.leaderboards) {
@@ -546,24 +568,26 @@ let spectateTargetId = null;
 // Personal Best & Ghost Recording (20Hz keyframes)
 const localPersonalBests = new Map(); // trackId -> { timeMs, splits, ghostFrames, date }
 
-// Load remembered personal bests if user has a saved profile
-if (hasSavedCustomName) {
-  try {
-    const rawPbs = localStorage.getItem('tm_personal_bests');
-    if (rawPbs) {
-      const parsed = JSON.parse(rawPbs);
+// Load remembered personal bests from localStorage for all users (guests and custom)
+try {
+  const rawPbs = localStorage.getItem('tm_personal_bests');
+  if (rawPbs) {
+    const parsed = JSON.parse(rawPbs);
+    if (parsed && typeof parsed === 'object') {
       for (const tid of Object.keys(parsed)) {
-        localPersonalBests.set(tid, {
-          timeMs: parsed[tid].timeMs,
-          splits: parsed[tid].splits || [],
-          ghostFrames: [],
-          date: parsed[tid].date
-        });
+        if (parsed[tid] && typeof parsed[tid].timeMs === 'number') {
+          localPersonalBests.set(tid, {
+            timeMs: parsed[tid].timeMs,
+            splits: parsed[tid].splits || [],
+            ghostFrames: [],
+            date: parsed[tid].date || Date.now()
+          });
+        }
       }
     }
-  } catch (e) {
-    console.warn('Could not parse stored PBs:', e);
   }
+} catch (e) {
+  console.warn('Could not parse stored PBs:', e);
 }
 
 let roomRecordGhost = null;
@@ -572,15 +596,18 @@ let ghostSampleAccum = 0;
 let showGhosts = true;
 
 function saveUserDataToLocalStorage() {
-  if (localStorage.getItem('tm_has_custom_name') !== 'true') return;
   try {
-    localStorage.setItem('tm_player_name', playerName);
-    localStorage.setItem('tm_player_color', playerColor);
-    localStorage.setItem('tm_car_model', playerCarModel);
+    if (localStorage.getItem('tm_has_custom_name') === 'true') {
+      localStorage.setItem('tm_player_name', playerName);
+      localStorage.setItem('tm_player_color', playerColor);
+      localStorage.setItem('tm_car_model', playerCarModel);
+    }
 
     const pbs = {};
     for (const [tid, pb] of localPersonalBests.entries()) {
-      pbs[tid] = { timeMs: pb.timeMs, splits: pb.splits || [], date: pb.date || Date.now() };
+      if (pb && typeof pb.timeMs === 'number') {
+        pbs[tid] = { timeMs: pb.timeMs, splits: pb.splits || [], date: pb.date || Date.now() };
+      }
     }
     localStorage.setItem('tm_personal_bests', JSON.stringify(pbs));
   } catch (err) {
@@ -628,6 +655,7 @@ function handleUsernameChange(val, explicit = false) {
 }
 
 function saveCustomUser(name) {
+  const oldName = playerName;
   playerName = name;
   nameInput.value = playerName;
   localStorage.setItem('tm_has_custom_name', 'true');
@@ -635,8 +663,28 @@ function saveCustomUser(name) {
   if (!localStorage.getItem('tm_user_id')) {
     localStorage.setItem('tm_user_id', `usr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`);
   }
+
+  // Seamlessly migrate any previous local leaderboard records from old guest name to new custom username
+  if (oldName && oldName.toLowerCase() !== playerName.toLowerCase()) {
+    for (const tid of Object.keys(trackLeaderboards)) {
+      const list = trackLeaderboards[tid];
+      if (Array.isArray(list)) {
+        for (const entry of list) {
+          if ((entry.playerName || '').toLowerCase() === oldName.toLowerCase()) {
+            entry.playerName = playerName;
+          }
+        }
+      }
+    }
+    persistLeaderboardsToLocalStorage();
+  }
+
   saveUserDataToLocalStorage();
   updateProfileBadgeUI();
+  syncLeaderboardWithServer();
+  renderCampaignTrackLists();
+  updateTop1RecordDisplay();
+  renderLeaderboard();
   showToast(`⭐ Welcome ${playerName}! Your username & data are now remembered in local storage.`);
   if (socket && partyState.inParty) {
     socket.emit('update_profile', { name: playerName, color: playerColor, carModel: playerCarModel });
@@ -2813,7 +2861,8 @@ function animate(now) {
       renderer.pbGhostCar.group.visible = false;
     } else {
       const pb = localPersonalBests.get(currentTrack.id);
-      const pbState = pb ? sampleGhostAtTime(pb.ghostFrames, physics.raceElapsedMs) : null;
+      const pbFrames = getPBGhostFrames(currentTrack, pb);
+      const pbState = pbFrames ? sampleGhostAtTime(pbFrames, physics.raceElapsedMs) : null;
       if (pbState) {
         renderer.pbGhostCar.group.visible = true;
         renderer.applyCarTransform(renderer.pbGhostCar, pbState, false);

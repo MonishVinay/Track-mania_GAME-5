@@ -12,3 +12,7 @@ yarn-error.log*
 .env
 .DS_Store
 Thumbs.db
+data/*.bak.json
+data/*.tmp
+*.tmp
+

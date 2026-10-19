@@ -103,24 +103,47 @@ const trackLeaderboards = {
   track_10: []
 };
 
+const BACKUP_FILE = path.join(DATA_DIR, 'leaderboards.bak.json');
+
 function loadLeaderboardsFromDisk() {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
+    let loaded = false;
     if (fs.existsSync(LEADERBOARD_FILE)) {
-      const raw = fs.readFileSync(LEADERBOARD_FILE, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        for (const tid of Object.keys(parsed)) {
-          if (Array.isArray(parsed[tid])) {
-            trackLeaderboards[tid] = parsed[tid].slice(0, 10);
+      try {
+        const raw = fs.readFileSync(LEADERBOARD_FILE, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          for (const tid of CAMPAIGN_TRACK_IDS) {
+            if (Array.isArray(parsed[tid])) {
+              trackLeaderboards[tid] = parsed[tid].slice(0, 10);
+            }
+          }
+          loaded = true;
+        }
+      } catch (err) {
+        console.warn('Could not parse leaderboards.json, will try backup file:', err.message);
+      }
+    }
+    if (!loaded && fs.existsSync(BACKUP_FILE)) {
+      try {
+        const rawBak = fs.readFileSync(BACKUP_FILE, 'utf8');
+        const parsedBak = JSON.parse(rawBak);
+        if (parsedBak && typeof parsedBak === 'object') {
+          for (const tid of CAMPAIGN_TRACK_IDS) {
+            if (Array.isArray(parsedBak[tid])) {
+              trackLeaderboards[tid] = parsedBak[tid].slice(0, 10);
+            }
           }
         }
+      } catch (bakErr) {
+        console.error('Could not load backup leaderboards:', bakErr.message);
       }
     }
   } catch (err) {
-    console.error('Could not load leaderboards.json:', err.message);
+    console.error('Could not load leaderboards from disk:', err.message);
   }
 }
 
@@ -129,7 +152,11 @@ function saveLeaderboardsToDisk() {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    fs.writeFileSync(LEADERBOARD_FILE, JSON.stringify(trackLeaderboards, null, 2), 'utf8');
+    const dataStr = JSON.stringify(trackLeaderboards, null, 2);
+    const tmpFile = path.join(DATA_DIR, `leaderboards_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.tmp`);
+    fs.writeFileSync(tmpFile, dataStr, 'utf8');
+    fs.renameSync(tmpFile, LEADERBOARD_FILE);
+    fs.writeFileSync(BACKUP_FILE, dataStr, 'utf8');
   } catch (err) {
     console.error('Could not save leaderboards.json:', err.message);
   }
@@ -159,7 +186,7 @@ function recordTrackTop10Time(trackId, playerName, color, timeMs, mode = 'practi
   const cleanSplits = Array.isArray(splits) ? splits.slice(0, 32).map((n) => Math.round(Number(n) || 0)) : [];
   const cleanCarModel = sanitizeString(carModel, 30) || 'race';
 
-  const existingIndex = list.findIndex((e) => e.playerName.toLowerCase() === cleanName.toLowerCase());
+  const existingIndex = list.findIndex((e) => (e.playerName || '').toLowerCase() === cleanName.toLowerCase());
   let entryId = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
   if (existingIndex !== -1) {
@@ -204,7 +231,7 @@ function recordTrackTop10Time(trackId, playerName, color, timeMs, mode = 'practi
     }
   }
 
-  const rankIndex = list.findIndex((e) => e.id === entryId || e.playerName.toLowerCase() === cleanName.toLowerCase());
+  const rankIndex = list.findIndex((e) => e.id === entryId || (e.playerName || '').toLowerCase() === cleanName.toLowerCase());
   const madeTop10 = rankIndex !== -1 && rankIndex < 10;
 
   if (madeTop10) {
@@ -248,7 +275,7 @@ function mergeLeaderboards(incoming) {
       const cleanTimestamp = typeof inEntry.timestamp === 'number' ? inEntry.timestamp : Date.now();
       const inGhostFrames = Array.isArray(inEntry.ghostFrames) && inEntry.ghostFrames.length > 0 ? inEntry.ghostFrames : null;
 
-      const existingIdx = currentList.findIndex((e) => e.playerName.toLowerCase() === cleanName.toLowerCase());
+      const existingIdx = currentList.findIndex((e) => (e.playerName || '').toLowerCase() === cleanName.toLowerCase());
       if (existingIdx !== -1) {
         if (cleanTime < currentList[existingIdx].timeMs) {
           currentList[existingIdx].timeMs = cleanTime;
@@ -320,8 +347,12 @@ app.post('/api/leaderboards/sync', (req, res) => {
   res.json({ ok: true, changed, leaderboards: trackLeaderboards });
 });
 
-// Reset leaderboards endpoint
-app.all('/api/reset-leaderboards', (req, res) => {
+// Reset leaderboards endpoint (requires secret admin token)
+app.post('/api/reset-leaderboards', (req, res) => {
+  const secret = (req.body && req.body.secret) || req.query.secret;
+  if (secret !== 'antigravity_admin_secret_99') {
+    return res.status(403).json({ error: 'Unauthorized: Admin secret required to reset leaderboards.' });
+  }
   for (const tid of CAMPAIGN_TRACK_IDS) {
     trackLeaderboards[tid] = [];
   }

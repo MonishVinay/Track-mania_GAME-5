@@ -711,10 +711,11 @@ export class GameRenderer {
       pushQuad(k0RR, b0R, b1R, k1RR, [0.22, 0.26, 0.33]);
 
       // Extruded Side Guardrails / Walls
-      const wallH = 1.25;
-      const wallThick = 0.45;
-      const wallCol = theme.wallColor;
-      const neonCol = isEven ? theme.kerbA : [0.1, 0.9, 1.0];
+      const isBankedIce = seg.surface === 'ice' && (Math.abs(s0.bank) > 0.15 || Math.abs(s1.bank) > 0.15);
+      const wallH = isBankedIce ? 2.85 : 1.25;
+      const wallThick = isBankedIce ? 0.65 : 0.45;
+      const wallCol = isBankedIce ? [0.45, 0.78, 0.95] : theme.wallColor;
+      const neonCol = isBankedIce ? [0.1, 0.95, 1.0] : (isEven ? theme.kerbA : [0.1, 0.9, 1.0]);
 
       if (seg.hasLeftWall) {
         const w0InB = pt(s0, -w0, 0);
