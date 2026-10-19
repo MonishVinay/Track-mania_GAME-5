@@ -2937,15 +2937,20 @@ function animate(now) {
   renderer.updateParticles(frameDt);
   renderer.render();
 
-  sound.updateEngine(
-    physics.rpm,
-    localState.speedKmh,
-    localState.drifting,
-    localState.grounded,
-    localState.boostLevel,
-    physics.engineOff,
-    !gameActive
-  );
+  sound.updateEngine({
+    rpm: physics.rpm,
+    speedKmh: localState.speedKmh,
+    gear: physics.gear,
+    throttle: (gameActive && !physics.controlsLocked && input.forward) ? 1 : 0,
+    brake: (gameActive && !physics.controlsLocked && (input.backward || input.brake || input.space)) ? 1 : 0,
+    drifting: localState.drifting,
+    grounded: localState.grounded,
+    boostLevel: localState.boostLevel,
+    surface: physics.surface,
+    engineOff: physics.engineOff,
+    paused: !gameActive,
+    dt: frameDt
+  });
 
   if (gameActive) {
     updateHUD(localState);
