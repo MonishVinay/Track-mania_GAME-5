@@ -17,15 +17,13 @@ function clampFinite(val, min, max, fallback) {
   return val < min ? min : val > max ? max : val;
 }
 
-function makeDistortionCurve(amount = 18) {
-  const k = typeof amount === 'number' ? amount : 18;
-  const n_samples = 512;
+function makeDistortionCurve(amount = 2.2) {
+  const n_samples = 1025;
   const curve = new Float32Array(n_samples);
-  const deg = Math.PI / 180;
+  const norm = Math.tanh(amount);
   for (let i = 0; i < n_samples; ++i) {
-    const x = (i * 2) / n_samples - 1;
-    // Smooth soft-clipping saturation formula
-    curve[i] = ((3 + k) * x * 20 * deg) / (Math.PI + k * Math.abs(x));
+    const x = (i / 512) - 1;
+    curve[i] = Math.tanh(amount * x) / norm;
   }
   return curve;
 }
@@ -40,23 +38,23 @@ export class SoundEngine {
     this.masterCompressor = null;
     this.masterGain = null;
 
-    // Multi-Harmonic Racing Engine Nodes
-    this.engineOsc1 = null;    // Fundamental cylinder combustion pulse (sawtooth)
-    this.engineOsc2 = null;    // Detuned combustion growl (sawtooth, +8 cents)
-    this.engineOsc3 = null;    // High-rev octave screamer (triangle, 2x fundamental)
-    this.engineSubOsc = null;  // Low-end mechanical sub-rumble (sine, 0.5x fundamental)
+    // Multi-Harmonic Racing Engine Nodes (Harmonically Phase-Locked, Zero Detuning Beating)
+    this.engineOsc1 = null;    // Fundamental cylinder combustion pulse (sawtooth, 1x)
+    this.engineOsc2 = null;    // Exhaust collector octave harmonic (sawtooth, 2x)
+    this.engineOsc3 = null;    // High-rev intake screamer (triangle, 3x)
     this.voiceGain1 = null;
     this.voiceGain2 = null;
     this.voiceGain3 = null;
-    this.voiceSubGain = null;
     this.enginePreGain = null;
-    this.engineShaper = null;   // WaveShaper soft-clip saturation
-    this.exhaustFilter = null;  // Peaking exhaust header resonant formant
+    this.engineShaper = null;   // WaveShaper soft-clip saturation (warm analog tanh curve)
+    this.exhaustFilter = null;  // Peaking exhaust header resonant formant (smooth Q)
     this.engineFilter = null;   // Main dynamic throttle/RPM lowpass filter
+    this.engineHighpass = null; // Clean low-cut filter at 82Hz (eliminates DC offset, 30-70Hz rumble & quill)
     this.engineGain = null;     // Master engine level
 
     // Straight-Cut Dogbox Racing Gearbox Whine
     this.gearWhineOsc = null;
+    this.gearWhineFilter = null;
     this.gearWhineGain = null;
 
     // Turbocharger Spool Whine
@@ -65,6 +63,7 @@ export class SoundEngine {
 
     // Aerodynamic Wind Rush at High Speeds
     this.windNoiseNode = null;
+    this.windHighpass = null;
     this.windFilter = null;
     this.windGain = null;
 
@@ -75,8 +74,8 @@ export class SoundEngine {
     this.driftGain = null;
 
     // Internal Audio State & Smoothing
-    this.curBaseFreq = 85;
-    this.curExhaustFreq = 780;
+    this.curBaseFreq = 95;
+    this.curExhaustFreq = 750;
     this.curFilterFreq = 1200;
     this.curEngineVol = 0;
     this.curGearWhineVol = 0;
@@ -129,12 +128,13 @@ export class SoundEngine {
       this.ctx = new AudioCtx();
 
       // 1. Master Dynamics Compressor (Broadcast-quality limiter/glue)
+      // 25ms attack prevents waveform distortion on low frequencies (no buzzing / quill)
       this.masterCompressor = this.ctx.createDynamicsCompressor();
-      this.masterCompressor.threshold.value = -14;
-      this.masterCompressor.knee.value = 16;
-      this.masterCompressor.ratio.value = 4.0;
-      this.masterCompressor.attack.value = 0.003;
-      this.masterCompressor.release.value = 0.12;
+      this.masterCompressor.threshold.value = -12;
+      this.masterCompressor.knee.value = 14;
+      this.masterCompressor.ratio.value = 3.0;
+      this.masterCompressor.attack.value = 0.025;
+      this.masterCompressor.release.value = 0.18;
 
       this.masterGain = this.ctx.createGain();
       this.masterGain.gain.value = this.muted ? 0.0 : 1.0;
@@ -142,89 +142,94 @@ export class SoundEngine {
       this.masterCompressor.connect(this.masterGain);
       this.masterGain.connect(this.ctx.destination);
 
-      // 2. Multi-Harmonic Racing Engine Synthesizer
-      this.engineOsc1 = this.ctx.createOscillator();
-      this.engineOsc2 = this.ctx.createOscillator();
-      this.engineOsc3 = this.ctx.createOscillator();
-      this.engineSubOsc = this.ctx.createOscillator();
+      // 2. Multi-Harmonic Racing Engine Synthesizer (Harmonically Locked - Zero Beating / Zero Quill)
+      this.engineOsc1 = this.ctx.createOscillator(); // 1x Fundamental combustion pulse (sawtooth)
+      this.engineOsc2 = this.ctx.createOscillator(); // 2x Exhaust collector octave harmonic (sawtooth)
+      this.engineOsc3 = this.ctx.createOscillator(); // 3x High-RPM valve & intake screamer (triangle)
 
       this.voiceGain1 = this.ctx.createGain();
       this.voiceGain2 = this.ctx.createGain();
       this.voiceGain3 = this.ctx.createGain();
-      this.voiceSubGain = this.ctx.createGain();
       this.enginePreGain = this.ctx.createGain();
 
-      // Oscillators setup
+      // Clean integer harmonic voicing with zero detuning beat
       this.engineOsc1.type = 'sawtooth';
-      this.engineOsc1.frequency.value = 85;
-      this.voiceGain1.gain.value = 0.42;
+      this.engineOsc1.frequency.value = 95;
+      this.voiceGain1.gain.value = 0.40;
 
       this.engineOsc2.type = 'sawtooth';
-      this.engineOsc2.frequency.value = 85.4;
-      this.engineOsc2.detune.value = 8.5; // +8.5 cents detune for roaring multi-pipe chorusing
-      this.voiceGain2.gain.value = 0.38;
+      this.engineOsc2.frequency.value = 190; // Exactly 2x fundamental (octave harmonic)
+      this.voiceGain2.gain.value = 0.25;
 
       this.engineOsc3.type = 'triangle';
-      this.engineOsc3.frequency.value = 170; // 2x octave harmonic screamer
-      this.engineOsc3.detune.value = -3.5;
-      this.voiceGain3.gain.value = 0.28;
+      this.engineOsc3.frequency.value = 285; // Exactly 3x fundamental (intake scream)
+      this.voiceGain3.gain.value = 0.18;
 
-      this.engineSubOsc.type = 'sine';
-      this.engineSubOsc.frequency.value = 42.5; // 0.5x sub-bass rumble
-      this.voiceSubGain.gain.value = 0.40;
-
-      this.enginePreGain.gain.value = 0.85;
+      this.enginePreGain.gain.value = 0.46; // Musical headroom into WaveShaper
 
       // Connect voices to pre-gain
       this.engineOsc1.connect(this.voiceGain1);
       this.engineOsc2.connect(this.voiceGain2);
       this.engineOsc3.connect(this.voiceGain3);
-      this.engineSubOsc.connect(this.voiceSubGain);
 
       this.voiceGain1.connect(this.enginePreGain);
       this.voiceGain2.connect(this.enginePreGain);
       this.voiceGain3.connect(this.enginePreGain);
-      this.voiceSubGain.connect(this.enginePreGain);
 
-      // Soft-Clipping Saturation / Waveshaper Stage
+      // Soft-Clipping Saturation / Waveshaper Stage (Warm Analog Saturation without IMD Buzz)
       this.engineShaper = this.ctx.createWaveShaper();
-      this.engineShaper.curve = makeDistortionCurve(18);
+      this.engineShaper.curve = makeDistortionCurve(2.2);
       this.engineShaper.oversample = '2x';
       this.enginePreGain.connect(this.engineShaper);
 
-      // Acoustic Exhaust Header Resonant Formant Filter
+      // Acoustic Exhaust Header Resonant Formant Filter (Natural smooth Q)
       this.exhaustFilter = this.ctx.createBiquadFilter();
       this.exhaustFilter.type = 'peaking';
-      this.exhaustFilter.frequency.value = 780;
-      this.exhaustFilter.Q.value = 2.4;
-      this.exhaustFilter.gain.value = 6.0; // +6dB tuned exhaust pipe resonance
+      this.exhaustFilter.frequency.value = 750;
+      this.exhaustFilter.Q.value = 1.2;
+      this.exhaustFilter.gain.value = 3.0; // Smooth +3dB tuned exhaust pipe warmth
 
       // Dynamic Throttle/RPM Lowpass Filter
       this.engineFilter = this.ctx.createBiquadFilter();
       this.engineFilter.type = 'lowpass';
       this.engineFilter.frequency.value = 1200;
-      this.engineFilter.Q.value = 1.4;
+      this.engineFilter.Q.value = 1.0;
+
+      // Highpass Clean-Cut Filter (Eliminates sub-audible DC drift, 30-70Hz rumble & low-frequency quill)
+      this.engineHighpass = this.ctx.createBiquadFilter();
+      this.engineHighpass.type = 'highpass';
+      this.engineHighpass.frequency.value = 82;
+      this.engineHighpass.Q.value = 0.707; // Standard Butterworth flat passband
 
       this.engineGain = this.ctx.createGain();
       this.engineGain.gain.value = 0.0;
 
       this.engineShaper.connect(this.exhaustFilter);
       this.exhaustFilter.connect(this.engineFilter);
-      this.engineFilter.connect(this.engineGain);
+      this.engineFilter.connect(this.engineHighpass);
+      this.engineHighpass.connect(this.engineGain);
       this.engineGain.connect(this.masterCompressor);
 
       this.engineOsc1.start();
       this.engineOsc2.start();
       this.engineOsc3.start();
-      this.engineSubOsc.start();
 
-      // 3. Straight-Cut Dogbox Racing Gearbox Whine
+      // 3. Straight-Cut Dogbox Racing Gearbox Whine (Smoothed & Lowpass Filtered)
       this.gearWhineOsc = this.ctx.createOscillator();
+      this.gearWhineFilter = this.ctx.createBiquadFilter();
       this.gearWhineGain = this.ctx.createGain();
+
       this.gearWhineOsc.type = 'sine';
       this.gearWhineOsc.frequency.value = 220;
+
+      this.gearWhineFilter.type = 'lowpass';
+      this.gearWhineFilter.frequency.value = 2400;
+      this.gearWhineFilter.Q.value = 0.7;
+
       this.gearWhineGain.gain.value = 0.0;
-      this.gearWhineOsc.connect(this.gearWhineGain);
+
+      this.gearWhineOsc.connect(this.gearWhineFilter);
+      this.gearWhineFilter.connect(this.gearWhineGain);
       this.gearWhineGain.connect(this.masterCompressor);
       this.gearWhineOsc.start();
 
@@ -238,29 +243,46 @@ export class SoundEngine {
       this.turboGain.connect(this.masterCompressor);
       this.turboOsc.start();
 
-      // 5. High-Speed Aerodynamic Wind Rush Noise
+      // 5. High-Speed Aerodynamic Wind Rush Noise (DC-Free, Highpass Filtered, Seamless Looping)
       const windBufferSize = Math.floor(this.ctx.sampleRate * 2.0);
       const windBuffer = this.ctx.createBuffer(1, windBufferSize, this.ctx.sampleRate);
       const windData = windBuffer.getChannelData(0);
       let lastVal = 0;
+      let sumVal = 0;
       for (let i = 0; i < windBufferSize; i++) {
         const white = Math.random() * 2 - 1;
-        lastVal = (lastVal + 0.025 * white) / 1.025; // Gentle pinking filter
-        windData[i] = lastVal * 2.8;
+        lastVal = 0.90 * lastVal + 0.10 * white; // Pink-filtered noise
+        windData[i] = lastVal;
+        sumVal += lastVal;
+      }
+      const dcVal = sumVal / windBufferSize;
+      for (let i = 0; i < windBufferSize; i++) {
+        windData[i] = (windData[i] - dcVal) * 1.8;
+      }
+      const loopFadeLen = 2048;
+      for (let i = 0; i < loopFadeLen; i++) {
+        const f = i / loopFadeLen;
+        windData[i] *= f;
+        windData[windBufferSize - 1 - i] *= f;
       }
       this.windNoiseNode = this.ctx.createBufferSource();
       this.windNoiseNode.buffer = windBuffer;
       this.windNoiseNode.loop = true;
 
+      this.windHighpass = this.ctx.createBiquadFilter();
+      this.windHighpass.type = 'highpass';
+      this.windHighpass.frequency.value = 220; // Zero sub-rumble from wind
+
       this.windFilter = this.ctx.createBiquadFilter();
       this.windFilter.type = 'lowpass';
       this.windFilter.frequency.value = 750;
-      this.windFilter.Q.value = 1.0;
+      this.windFilter.Q.value = 0.8;
 
       this.windGain = this.ctx.createGain();
       this.windGain.gain.value = 0.0;
 
-      this.windNoiseNode.connect(this.windFilter);
+      this.windNoiseNode.connect(this.windHighpass);
+      this.windHighpass.connect(this.windFilter);
       this.windFilter.connect(this.windGain);
       this.windGain.connect(this.masterCompressor);
       this.windNoiseNode.start();
@@ -270,7 +292,13 @@ export class SoundEngine {
       const driftBuffer = this.ctx.createBuffer(1, driftBufferSize, this.ctx.sampleRate);
       const driftData = driftBuffer.getChannelData(0);
       for (let i = 0; i < driftBufferSize; i++) {
-        driftData[i] = (Math.random() * 2 - 1) * 0.85;
+        driftData[i] = (Math.random() * 2 - 1) * 0.75;
+      }
+      const driftFadeLen = 2048;
+      for (let i = 0; i < driftFadeLen; i++) {
+        const f = i / driftFadeLen;
+        driftData[i] *= f;
+        driftData[driftBufferSize - 1 - i] *= f;
       }
       this.driftNoiseNode = this.ctx.createBufferSource();
       this.driftNoiseNode.buffer = driftBuffer;
@@ -422,56 +450,55 @@ export class SoundEngine {
       }
     }
 
-    // 3. Multi-Harmonic Engine Frequencies
-    // High-rev race car fundamental pitch: 78Hz idle burble up to 450Hz redline scream (and 580Hz on super boost)
+    // 3. Multi-Harmonic Engine Frequencies (Harmonically Phase-Locked, Zero Detuning Beating)
+    // High-rev race car fundamental pitch: 86Hz idle burble up to 450Hz redline scream (and 550Hz on super boost)
     const targetBaseFreq = clampFinite(
-      74 + safeRpm * 320 + safeBoost * 48 + (safeSpeed / 420) * 32,
-      65,
+      86 + safeRpm * 300 + safeBoost * 50 + (safeSpeed / 420) * 34,
+      80,
       620,
-      85
+      95
     );
 
     // Dynamic Intake / Exhaust Filter tracking throttle & RPM
     // Wide open throttle opens the lowpass filter to 7500+ Hz for an intense un-muffled race scream!
     const throttleOpen = throttle > 0 ? 1.0 : 0.25;
     const targetFilterFreq = clampFinite(
-      750 + safeRpm * 2800 * throttleOpen + safeBoost * 1600 + (safeSpeed / 400) * 900,
-      450,
+      800 + safeRpm * 3200 * throttleOpen + safeBoost * 1800 + (safeSpeed / 400) * 900,
+      550,
       9500,
       1200
     );
 
     // Peaking exhaust resonator formant frequency
     const targetExhaustFreq = clampFinite(
-      620 + safeRpm * 420 + safeBoost * 120,
-      550,
-      1400,
-      780
+      640 + safeRpm * 400 + safeBoost * 120,
+      580,
+      1350,
+      760
     );
 
     // Master Engine Volume with ignition cut dip on shifts
     let targetEngineVol = clampFinite(
-      0.052 + Math.min(0.085, (safeSpeed / 320) * 0.075) + (throttle > 0 ? 0.025 : 0) + safeBoost * 0.02,
-      0.038,
-      0.155,
-      0.06
+      0.060 + Math.min(0.08, (safeSpeed / 320) * 0.07) + (throttle > 0 ? 0.024 : 0) + safeBoost * 0.02,
+      0.045,
+      0.17,
+      0.07
     );
     if (this.shiftCutTimer > 0) {
-      targetEngineVol *= 0.35; // 65% volume drop on shift cut
+      targetEngineVol *= 0.35; // volume drop on shift cut
     }
 
-    // 4. Straight-Cut Transmission Gearbox Whine
-    // Higher-pitched mechanical dogbox gear scream proportional to speed & gear ratio
+    // 4. Straight-Cut Transmission Gearbox Whine (Subtle & Lowpass Filtered)
     const targetGearWhineFreq = clampFinite(
-      180 + safeSpeed * 4.6 + gear * 55,
-      150,
-      2800,
+      220 + safeSpeed * 4.2 + gear * 45,
+      180,
+      2600,
       350
     );
     const targetGearWhineVol = clampFinite(
-      safeSpeed > 25 ? Math.min(0.042, ((safeSpeed - 20) / 280) * 0.036 * (throttle > 0 ? 1.25 : 0.75)) : 0,
+      safeSpeed > 35 ? Math.min(0.028, ((safeSpeed - 35) / 280) * 0.024 * (throttle > 0 ? 1.2 : 0.7)) : 0,
       0,
-      0.045,
+      0.030,
       0
     );
 
@@ -524,25 +551,22 @@ export class SoundEngine {
     this.curDriftVol += (targetDriftVol - this.curDriftVol) * 0.25;
     this.curScreechFreq += (targetScreechFreq - this.curScreechFreq) * 0.25;
 
-    // Apply to Engine Oscillators & Filters
-    const f1 = clampFinite(this.curBaseFreq, 45, 650, 85);
+    // Apply to Engine Oscillators & Filters (Phase-locked integer multiples, zero detuning beating)
+    const f1 = clampFinite(this.curBaseFreq, 50, 650, 95);
     this.engineOsc1.frequency.value = f1;
-    this.engineOsc2.frequency.value = f1 * 1.006; // Detuned growl
-    this.engineOsc3.frequency.value = f1 * 1.996; // Octave screamer
-    if (this.engineSubOsc) {
-      this.engineSubOsc.frequency.value = f1 * 0.5; // Sub-bass rumble
-    }
+    this.engineOsc2.frequency.value = f1 * 2.0; // Phase-locked octave - zero beating / zero flutter
+    this.engineOsc3.frequency.value = f1 * 3.0; // Phase-locked 3rd harmonic screamer - zero beating
 
     // High screamer voice gain opens with throttle & RPM for authentic Formula 1 shriek
     if (this.voiceGain3) {
-      this.voiceGain3.gain.value = clampFinite(0.12 + safeRpm * 0.28 * throttleOpen + safeBoost * 0.1, 0.1, 0.45, 0.25);
+      this.voiceGain3.gain.value = clampFinite(0.08 + safeRpm * 0.24 * throttleOpen + safeBoost * 0.08, 0.06, 0.38, 0.18);
     }
 
-    this.exhaustFilter.frequency.value = clampFinite(this.curExhaustFreq, 450, 1600, 780);
-    this.exhaustFilter.gain.value = throttle > 0 ? 6.5 : 2.5;
+    this.exhaustFilter.frequency.value = clampFinite(this.curExhaustFreq, 480, 1500, 750);
+    this.exhaustFilter.gain.value = throttle > 0 ? 3.5 : 1.2;
 
-    this.engineFilter.frequency.value = clampFinite(this.curFilterFreq, 350, 10500, 1200);
-    this.engineGain.gain.value = clampFinite(this.curEngineVol, 0, 0.18, 0.05);
+    this.engineFilter.frequency.value = clampFinite(this.curFilterFreq, 450, 10500, 1200);
+    this.engineGain.gain.value = clampFinite(this.curEngineVol, 0, 0.18, 0.06);
 
     // Apply to Transmission Gear Whine
     if (this.gearWhineOsc && this.gearWhineGain) {
@@ -640,13 +664,13 @@ export class SoundEngine {
       gain.gain.setValueAtTime(popVol, now);
       gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
 
-      // Low bass thud component for the exhaust blast
+      // Punchy exhaust pop thud (tight 120Hz to 55Hz decay, zero 32Hz sub rumble)
       const thudOsc = this.ctx.createOscillator();
       const thudGain = this.ctx.createGain();
-      thudOsc.type = 'sine';
-      thudOsc.frequency.setValueAtTime(85, now);
-      thudOsc.frequency.exponentialRampToValueAtTime(32, now + dur);
-      thudGain.gain.setValueAtTime(popVol * 0.6, now);
+      thudOsc.type = 'triangle';
+      thudOsc.frequency.setValueAtTime(120, now);
+      thudOsc.frequency.exponentialRampToValueAtTime(55, now + dur);
+      thudGain.gain.setValueAtTime(popVol * 0.45, now);
       thudGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
 
       noise.connect(filter);
